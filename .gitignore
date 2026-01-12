@@ -1,0 +1,19 @@
+# Data
+data/raw/
+data/processed/
+*.nc
+*.grib
+*.csv
+
+# HPC artifacts
+slurm-*.out
+slurm-*.err
+*.log
+
+# Python
+__pycache__/
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv
