@@ -278,7 +278,7 @@ for COUNTRY, COUNTRY_CODE in zip(countries_tracker, countries):
         else:
             factor = 1.0
     else:
-        factor = 1.0
+        factor = 0.0
 
     print(f"Calibration factor for {COUNTRY}: {factor:.4f}")
 
