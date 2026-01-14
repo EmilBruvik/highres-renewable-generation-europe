@@ -16,8 +16,18 @@ import pandas as pd
 import xarray as xr
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+if "functions" in sys.modules:
+    del sys.modules["functions"]
 
 import functions
+import inspect
+print("functions module file:", functions.__file__, flush=True)
+print("estimate_power_final sig:", inspect.signature(functions.estimate_power_final), flush=True)
+print("energy_monthly.py file:", __file__, flush=True)
 
 # python -u scripts/energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
 
