@@ -40,11 +40,17 @@ Both PV and wind farm files have the following structure:
 - `is_asbuilt` (farm): Boolean indicating if farm is in as-built scenario
 
 **Coordinates:**
-- `farm`: Farm identifier string (format: `{country}_{area}_{index}`)
+- `farm`: Farm identifier string (format: `{country}_{area}_{hash}` where hash is derived from lat/lon/capacity)
 - `time`: Time coordinates
 - `country` (farm): Country name
 - `area` (farm): Area/bidding zone code
 - `status` (farm): Operational status
+
+### Farm ID Generation
+Farm IDs are generated using SHA-256 hash of the farm's location and capacity to ensure:
+- Uniqueness across farms
+- Stability across multiple runs
+- Independence from DataFrame index changes
 
 ### Scenarios
 
@@ -83,6 +89,7 @@ asbuilt_power = ds.power_mw_2025.where(ds.is_asbuilt, 0)
 4. **MonthlyRunner**:
    - Added `write_farm_timeseries` initialization parameter
    - Added `_write_farm_netcdf_atomic()` for atomic writes
+   - Added `_generate_farm_id()` for stable hash-based IDs
    - Added `_write_pv_farm_timeseries()` to generate PV farm outputs
    - Added `_write_wind_farm_timeseries()` to generate wind farm outputs
 
@@ -92,6 +99,7 @@ asbuilt_power = ds.power_mw_2025.where(ds.is_asbuilt, 0)
 2. **h5netcdf Engine**: All outputs use `engine="h5netcdf"` for compatibility
 3. **Safe Start Year Handling**: No unsafe casting of NaN values to integers
 4. **Memory Management**: Farm data only collected when flag is enabled
+5. **Stable IDs**: SHA-256 hash-based farm identifiers
 
 ### Correction Factors
 
@@ -112,3 +120,18 @@ Per-farm timeseries include the same correction factors as the aggregated output
 - Backward compatible: existing usage unchanged
 - Output files readable with `xarray.open_dataset(..., engine='h5netcdf')`
 - Works in environments where netcdf4 engine may fail
+
+## Testing
+
+Run the included test suite:
+```bash
+python test_farm_timeseries.py
+```
+
+This validates:
+- Python syntax
+- CLI flag presence
+- Atomic write implementation
+- h5netcdf engine usage
+- Safe start_year handling
+- Per-farm data structures

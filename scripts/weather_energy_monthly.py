@@ -519,8 +519,9 @@ class MonthlyRunner:
     def _generate_farm_id(country: str, area_code: str, lat: float, lon: float, capacity: float) -> str:
         """Generate a stable farm ID based on location and capacity."""
         # Create a hash from lat, lon, and capacity for uniqueness
+        # Using SHA-256 for ID generation (not for cryptographic purposes)
         id_str = f"{lat:.6f}_{lon:.6f}_{capacity:.3f}"
-        hash_suffix = hashlib.md5(id_str.encode()).hexdigest()[:8]
+        hash_suffix = hashlib.sha256(id_str.encode()).hexdigest()[:12]
         return f"{country}_{area_code}_{hash_suffix}"
 
     def _write_pv_farm_timeseries(
