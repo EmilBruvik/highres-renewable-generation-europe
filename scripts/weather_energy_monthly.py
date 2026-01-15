@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # coding: utf-8
 
+#-----------Run commands----------------#
+# python -u scripts/weather_energy_monthly.py --year 2024 --month 09
+# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
+# disown
+# set -e; for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+#---------------------------------------#
+
+
 from __future__ import annotations
 
 import os
@@ -27,9 +36,9 @@ import functions
 import inspect
 print("functions module file:", functions.__file__, flush=True)
 print("estimate_power_final sig:", inspect.signature(functions.estimate_power_final), flush=True)
-print("energy_monthly.py file:", __file__, flush=True)
+print("weather_energy_monthly.py file:", __file__, flush=True)
 
-# python -u scripts/energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
+# python -u scripts/weather_energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
 
 MONTHS = [
     ("01", "jan"), ("02", "feb"), ("03", "mar"), ("04", "apr"),
@@ -101,9 +110,9 @@ class GridIndexer:
         pts1 = np.column_stack((lat, lon + 360.0))
         d0, idx0 = self.tree0.query(pts0, k=1)
         d1, idx1 = self.tree360.query(pts1, k=1)
-        idx = np.where(d0 <= d1, idx0, idx1).astype(np.int64)
+        idx = np.where(d0 <= d1, idx0, idx1).astype(int)
         y, x = np.unravel_index(idx, self.shape)
-        return y.astype(np.int32), x.astype(np.int32)
+        return y.astype(int), x.astype(int)
 
 
 class ActualGenerationLoader:
@@ -232,13 +241,13 @@ class PVCalculator:
             df_country = df_country.copy()
 
         if len(df_country) == 0:
-            return np.zeros(xrds.sizes["time"], dtype=np.float32), np.zeros(xrds.sizes["time"], dtype=np.float32), 0.0
+            return np.zeros(xrds.sizes["time"], dtype=np.float64), np.zeros(xrds.sizes["time"], dtype=np.float64), 0.0
 
         #operating only (both scenarios)
         op_status = set(functions.operating_farms(country, "solar"))
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
         if len(df_country) == 0:
-            return np.zeros(xrds.sizes["time"], dtype=np.float32), np.zeros(xrds.sizes["time"], dtype=np.float32), 0.0
+            return np.zeros(xrds.sizes["time"], dtype=np.float64), np.zeros(xrds.sizes["time"], dtype=np.float64), 0.0
 
         #actual
         solar_actual = actual_loader.solar_series_mw(actual_file, area_code)
@@ -249,7 +258,7 @@ class PVCalculator:
         y_idx, x_idx = indexer.map_points(lat, lon)
 
         start_year = pd.to_numeric(df_country["Start year"], errors="coerce").to_numpy()
-        asbuilt_mask = np.isfinite(start_year) & (start_year.astype(np.int32) <= ms.prod_year)
+        asbuilt_mask = np.isfinite(start_year) & (start_year <= ms.prod_year)
 
         T = xrds.sizes["time"]
 
@@ -299,7 +308,7 @@ class PVCalculator:
 
         # factor from as-built; apply to both
         factor = self._factor_from_asbuilt(mw_asbuilt, xrds["time"].values, solar_actual)
-        return (mw_asbuilt * factor).astype(np.float32), (mw_2025 * factor).astype(np.float32), float(factor)
+        return (mw_asbuilt * factor).astype(np.float64), (mw_2025 * factor).astype(np.float64), float(factor)
 
     @staticmethod
     def _factor_from_asbuilt(model_mw: np.ndarray, time_vals: np.ndarray, actual_mw: pd.Series) -> float:
@@ -329,7 +338,7 @@ class WindCalculator:
         ds.load()
         return ds
 
-    def country_timeseries(
+def country_timeseries(
         self,
         ms: MonthSpec,
         xrds: xr.Dataset,
@@ -342,7 +351,7 @@ class WindCalculator:
         df_country = self.df[self.df["Country/Area"] == country].copy()
         if len(df_country) == 0:
             T = xrds.sizes["valid_time"]
-            return np.zeros(T, dtype=np.float32), np.zeros(T, dtype=np.float32), 0.0
+            return np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0
 
         if area_code in ZONES:
             zone_cities = functions.get_bidding_zone_mapping(area_code)
@@ -357,7 +366,7 @@ class WindCalculator:
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
         if len(df_country) == 0:
             T = xrds.sizes["valid_time"]
-            return np.zeros(T, dtype=np.float32), np.zeros(T, dtype=np.float32), 0.0
+            return np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0
 
         wind_actual = actual_loader.wind_series_mw(actual_file, area_code)
 
@@ -365,9 +374,20 @@ class WindCalculator:
         lon = df_country["Longitude"].astype(float).to_numpy()
         y_idx, x_idx = indexer.map_points(lat, lon)
 
-        start_year = pd.to_numeric(df_country["Start year"], errors="coerce").to_numpy()
-        start_year = np.where(np.isfinite(start_year), start_year, self.ref_startyear).astype(np.int32)
-        asbuilt_mask = start_year <= ms.prod_year
+        # Parse start year as float with NaNs for unknown values
+        start_year_f = pd.to_numeric(df_country["Start year"], errors="coerce").to_numpy(dtype=float)
+
+        # "As-built" scenario should only include farms where the start year is known and <= prod_year.
+        # Add a plausible range guard to avoid garbage sentinel values.
+        asbuilt_mask = (
+            np.isfinite(start_year_f)
+            & (start_year_f >= 1800)
+            & (start_year_f <= ms.prod_year)
+        )
+
+        # For modeling, fill missing/invalid start years with a reference year (do NOT use this for asbuilt_mask)
+        ref = float(self.ref_startyear) if getattr(self, "ref_startyear", None) is not None else float(ms.prod_year)
+        start_year_model = np.where(np.isfinite(start_year_f), np.floor(start_year_f), ref).astype(int)
 
         T = xrds.sizes["valid_time"]
         mw_2025 = np.zeros(T, dtype=np.float64)
@@ -380,7 +400,7 @@ class WindCalculator:
                 lat=float(row["Latitude"]),
                 lon=float(row["Longitude"]),
                 capacity=row["Capacity (MW)"],
-                startyear=int(start_year[i]),
+                startyear=int(start_year_model[i]),
                 prod_year=ms.prod_year,
                 status=row["Status"],
                 installation_type=row["Installation Type"],
@@ -401,8 +421,12 @@ class WindCalculator:
             if asbuilt_mask[i]:
                 mw_asbuilt += ts_mw
 
-        factor = PVCalculator._factor_from_asbuilt(mw_asbuilt, xrds["valid_time"].values, wind_actual)
-        return (mw_asbuilt * factor).astype(np.float32), (mw_2025 * factor).astype(np.float32), float(factor)
+        factor = PVCalculator._factor_from_asbuilt(
+            mw_asbuilt,
+            xrds["valid_time"].values,
+            wind_actual,
+        )
+        return (mw_asbuilt * factor).astype(np.float64), (mw_2025 * factor).astype(np.float64), float(factor)
 
 
 class MonthlyRunner:
