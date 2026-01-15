@@ -16,6 +16,8 @@ import os
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 import gc
+import hashlib
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Tuple
@@ -222,7 +224,8 @@ class PVCalculator:
         actual_file: pd.DataFrame,
         country: str,
         area_code: str,
-    ) -> tuple[np.ndarray, np.ndarray, float]:
+        return_farm_data: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, float] | tuple[np.ndarray, np.ndarray, float, pd.DataFrame, list]:
         # farm list
         df_country = pd.concat(
             [
@@ -243,12 +246,20 @@ class PVCalculator:
             df_country = df_country.copy()
 
         if len(df_country) == 0:
+            if return_farm_data:
+                return (np.zeros(xrds.sizes["time"], dtype=np.float64), 
+                       np.zeros(xrds.sizes["time"], dtype=np.float64), 
+                       0.0, pd.DataFrame(), [])
             return np.zeros(xrds.sizes["time"], dtype=np.float64), np.zeros(xrds.sizes["time"], dtype=np.float64), 0.0
 
         #operating only (both scenarios)
         op_status = set(functions.operating_farms(country, "solar"))
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
         if len(df_country) == 0:
+            if return_farm_data:
+                return (np.zeros(xrds.sizes["time"], dtype=np.float64), 
+                       np.zeros(xrds.sizes["time"], dtype=np.float64), 
+                       0.0, pd.DataFrame(), [])
             return np.zeros(xrds.sizes["time"], dtype=np.float64), np.zeros(xrds.sizes["time"], dtype=np.float64), 0.0
 
         #actual
@@ -297,6 +308,8 @@ class PVCalculator:
 
         watts_2025 = np.zeros(T, dtype=np.float64)
         watts_asbuilt = np.zeros(T, dtype=np.float64)
+        farm_timeseries = []  # Store individual farm timeseries if needed
+        
         for r in farms:
             if r is None:
                 continue
@@ -304,12 +317,28 @@ class PVCalculator:
             watts_2025 += ts_w
             if asbuilt_mask[i]:
                 watts_asbuilt += ts_w
+            if return_farm_data:
+                farm_timeseries.append((i, ts_w))
 
         mw_2025 = watts_2025 / 1_000_000.0
         mw_asbuilt = watts_asbuilt / 1_000_000.0
 
         # factor from as-built; apply to both
         factor = self._factor_from_asbuilt(mw_asbuilt, xrds["time"].values, solar_actual)
+        
+        if return_farm_data:
+            # Prepare farm metadata
+            df_meta = df_country.copy()
+            df_meta['y_idx'] = y_idx
+            df_meta['x_idx'] = x_idx
+            df_meta['start_year_parsed'] = start_year
+            df_meta['asbuilt_mask'] = asbuilt_mask
+            return ((mw_asbuilt * factor).astype(np.float64), 
+                   (mw_2025 * factor).astype(np.float64), 
+                   float(factor), 
+                   df_meta, 
+                   farm_timeseries)
+        
         return (mw_asbuilt * factor).astype(np.float64), (mw_2025 * factor).astype(np.float64), float(factor)
 
     @staticmethod
@@ -349,10 +378,15 @@ class WindCalculator:
         actual_file: pd.DataFrame,
         country: str,
         area_code: str,
-    ) -> tuple[np.ndarray, np.ndarray, float]:
+        return_farm_data: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, float] | tuple[np.ndarray, np.ndarray, float, pd.DataFrame, list]:
         df_country = self.df[self.df["Country/Area"] == country].copy()
         if len(df_country) == 0:
             T = xrds.sizes["valid_time"]
+            if return_farm_data:
+                return (np.zeros(T, dtype=np.float64), 
+                       np.zeros(T, dtype=np.float64), 
+                       0.0, pd.DataFrame(), [])
             return np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0
 
         if area_code in ZONES:
@@ -368,6 +402,10 @@ class WindCalculator:
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
         if len(df_country) == 0:
             T = xrds.sizes["valid_time"]
+            if return_farm_data:
+                return (np.zeros(T, dtype=np.float64), 
+                       np.zeros(T, dtype=np.float64), 
+                       0.0, pd.DataFrame(), [])
             return np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0
 
         wind_actual = actual_loader.wind_series_mw(actual_file, area_code)
@@ -394,6 +432,7 @@ class WindCalculator:
         T = xrds.sizes["valid_time"]
         mw_2025 = np.zeros(T, dtype=np.float64)
         mw_asbuilt = np.zeros(T, dtype=np.float64)
+        farm_timeseries = []  # Store individual farm timeseries if needed
 
         for i in range(len(df_country)):
             row = df_country.iloc[i]
@@ -422,19 +461,36 @@ class WindCalculator:
             mw_2025 += ts_mw
             if asbuilt_mask[i]:
                 mw_asbuilt += ts_mw
+            if return_farm_data:
+                farm_timeseries.append((i, ts_mw))
 
         factor = PVCalculator._factor_from_asbuilt(
             mw_asbuilt,
             xrds["valid_time"].values,
             wind_actual,
         )
+        
+        if return_farm_data:
+            # Prepare farm metadata
+            df_meta = df_country.copy()
+            df_meta['y_idx'] = y_idx
+            df_meta['x_idx'] = x_idx
+            df_meta['start_year_parsed'] = start_year_f
+            df_meta['asbuilt_mask'] = asbuilt_mask
+            return ((mw_asbuilt * factor).astype(np.float64), 
+                   (mw_2025 * factor).astype(np.float64), 
+                   float(factor), 
+                   df_meta, 
+                   farm_timeseries)
+        
         return (mw_asbuilt * factor).astype(np.float64), (mw_2025 * factor).astype(np.float64), float(factor)
 
 
 class MonthlyRunner:
-    def __init__(self, out_dir: Path, n_jobs_pv: int = 8):
+    def __init__(self, out_dir: Path, n_jobs_pv: int = 8, write_farm_timeseries: bool = False):
         self.out_dir = out_dir
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.write_farm_timeseries = write_farm_timeseries
 
         self.tzmap = functions.get_timezone_mapping()
         self.actual_loader = ActualGenerationLoader(self.tzmap)
@@ -443,6 +499,219 @@ class MonthlyRunner:
         self.wind = WindCalculator()
 
     @staticmethod
+    
+    def _write_farm_netcdf_atomic(ds: xr.Dataset, out_path: Path):
+        """Write NetCDF with atomic write and h5netcdf engine."""
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            delete=False,
+            dir=out_path.parent,
+            prefix=".tmp_",
+            suffix=".nc",
+        ) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            ds.to_netcdf(tmp_path, engine="h5netcdf")
+            os.replace(tmp_path, out_path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+
+    @staticmethod
+    def _generate_farm_id(country: str, area_code: str, lat: float, lon: float, capacity: float) -> str:
+        """Generate a stable farm ID based on location and capacity."""
+        # Create a hash from lat, lon, and capacity for uniqueness
+        # Using SHA-256 for ID generation (not for cryptographic purposes)
+        id_str = f"{lat:.6f}_{lon:.6f}_{capacity:.3f}"
+        hash_suffix = hashlib.sha256(id_str.encode()).hexdigest()[:12]
+        return f"{country}_{area_code}_{hash_suffix}"
+
+    def _write_pv_farm_timeseries(
+        self,
+        ms: MonthSpec,
+        time_coords: np.ndarray,
+        all_meta: list[pd.DataFrame],
+        all_farms: list[list],
+        correction_factors: list[float],
+        countries: list[str],
+        area_codes: list[str],
+    ):
+        """Write per-farm PV timeseries to NetCDF."""
+        # Collect all farms across areas
+        farm_list = []
+        for area_idx, (df_meta, farm_ts_list) in enumerate(zip(all_meta, all_farms)):
+            if len(df_meta) == 0:
+                continue
+            area_code = area_codes[area_idx]
+            country = countries[area_idx]
+            factor = correction_factors[area_idx]
+            
+            for i, ts_w in farm_ts_list:
+                row = df_meta.iloc[i]
+                # Convert watts to MW and apply correction factor
+                ts_mw = (ts_w / 1_000_000.0) * factor
+                
+                # Generate stable farm ID based on location and capacity
+                farm_id = self._generate_farm_id(
+                    country, area_code,
+                    float(row["Latitude"]), float(row["Longitude"]),
+                    float(row["Capacity (MW)"])
+                )
+                farm_list.append({
+                    "farm_id": farm_id,
+                    "country": country,
+                    "area": area_code,
+                    "latitude": float(row["Latitude"]),
+                    "longitude": float(row["Longitude"]),
+                    "y_idx": int(row["y_idx"]),
+                    "x_idx": int(row["x_idx"]),
+                    "capacity_mw": float(row["Capacity (MW)"]),
+                    "status": str(row["Status"]),
+                    "start_year": float(row["start_year_parsed"]) if np.isfinite(row["start_year_parsed"]) else np.nan,
+                    "is_asbuilt": bool(row["asbuilt_mask"]),
+                    "timeseries_mw": ts_mw,
+                })
+        
+        if not farm_list:
+            print("No PV farms to write.", flush=True)
+            return
+        
+        # Build dataset
+        n_farms = len(farm_list)
+        n_time = len(time_coords)
+        
+        # Stack timeseries into 2D array (farm, time)
+        ts_array = np.zeros((n_farms, n_time), dtype=np.float32)
+        for i, farm in enumerate(farm_list):
+            ts_array[i, :] = farm["timeseries_mw"]
+        
+        # Create dataset
+        ds = xr.Dataset(
+            data_vars={
+                "power_mw_2025": (("farm", "time"), ts_array, {"long_name": "PV power output MW (2025 scenario)"}),
+                "latitude": (("farm",), np.array([f["latitude"] for f in farm_list], dtype=np.float32)),
+                "longitude": (("farm",), np.array([f["longitude"] for f in farm_list], dtype=np.float32)),
+                "y_idx": (("farm",), np.array([f["y_idx"] for f in farm_list], dtype=np.int32)),
+                "x_idx": (("farm",), np.array([f["x_idx"] for f in farm_list], dtype=np.int32)),
+                "capacity_mw": (("farm",), np.array([f["capacity_mw"] for f in farm_list], dtype=np.float32)),
+                "start_year": (("farm",), np.array([f["start_year"] for f in farm_list], dtype=np.float32)),
+                "is_asbuilt": (("farm",), np.array([f["is_asbuilt"] for f in farm_list], dtype=bool)),
+            },
+            coords={
+                "farm": np.array([f["farm_id"] for f in farm_list], dtype="U"),
+                "time": time_coords,
+                "country": (("farm",), np.array([f["country"] for f in farm_list], dtype="U")),
+                "area": (("farm",), np.array([f["area"] for f in farm_list], dtype="U")),
+                "status": (("farm",), np.array([f["status"] for f in farm_list], dtype="U")),
+            },
+            attrs={
+                "year": ms.year,
+                "month_number": ms.month_number,
+                "month_name": ms.month_name,
+                "description": "Per-farm PV generation timeseries with metadata",
+                "note": "power_mw_2025 includes all farms with correction factor applied; is_asbuilt indicates farms in as-built scenario",
+            },
+        )
+        
+        out_file = self.out_dir / f"{ms.month_number}_{ms.year}_pv_farm_timeseries.nc"
+        if out_file.exists():
+            out_file.unlink()
+        self._write_farm_netcdf_atomic(ds, out_file)
+        print(f"Wrote {out_file} ({n_farms} farms)", flush=True)
+
+    def _write_wind_farm_timeseries(
+        self,
+        ms: MonthSpec,
+        time_coords: np.ndarray,
+        all_meta: list[pd.DataFrame],
+        all_farms: list[list],
+        correction_factors: list[float],
+        countries: list[str],
+        area_codes: list[str],
+    ):
+        """Write per-farm wind timeseries to NetCDF."""
+        # Collect all farms across areas
+        farm_list = []
+        for area_idx, (df_meta, farm_ts_list) in enumerate(zip(all_meta, all_farms)):
+            if len(df_meta) == 0:
+                continue
+            area_code = area_codes[area_idx]
+            country = countries[area_idx]
+            factor = correction_factors[area_idx]
+            
+            for i, ts_mw in farm_ts_list:
+                row = df_meta.iloc[i]
+                # Apply correction factor
+                ts_mw_corrected = ts_mw * factor
+                
+                # Generate stable farm ID based on location and capacity
+                farm_id = self._generate_farm_id(
+                    country, area_code,
+                    float(row["Latitude"]), float(row["Longitude"]),
+                    float(row["Capacity (MW)"])
+                )
+                farm_list.append({
+                    "farm_id": farm_id,
+                    "country": country,
+                    "area": area_code,
+                    "latitude": float(row["Latitude"]),
+                    "longitude": float(row["Longitude"]),
+                    "y_idx": int(row["y_idx"]),
+                    "x_idx": int(row["x_idx"]),
+                    "capacity_mw": float(row["Capacity (MW)"]),
+                    "status": str(row["Status"]),
+                    "start_year": float(row["start_year_parsed"]) if np.isfinite(row["start_year_parsed"]) else np.nan,
+                    "is_asbuilt": bool(row["asbuilt_mask"]),
+                    "timeseries_mw": ts_mw_corrected,
+                })
+        
+        if not farm_list:
+            print("No wind farms to write.", flush=True)
+            return
+        
+        # Build dataset
+        n_farms = len(farm_list)
+        n_time = len(time_coords)
+        
+        # Stack timeseries into 2D array (farm, time)
+        ts_array = np.zeros((n_farms, n_time), dtype=np.float32)
+        for i, farm in enumerate(farm_list):
+            ts_array[i, :] = farm["timeseries_mw"]
+        
+        # Create dataset
+        ds = xr.Dataset(
+            data_vars={
+                "power_mw_2025": (("farm", "time"), ts_array, {"long_name": "Wind power output MW (2025 scenario)"}),
+                "latitude": (("farm",), np.array([f["latitude"] for f in farm_list], dtype=np.float32)),
+                "longitude": (("farm",), np.array([f["longitude"] for f in farm_list], dtype=np.float32)),
+                "y_idx": (("farm",), np.array([f["y_idx"] for f in farm_list], dtype=np.int32)),
+                "x_idx": (("farm",), np.array([f["x_idx"] for f in farm_list], dtype=np.int32)),
+                "capacity_mw": (("farm",), np.array([f["capacity_mw"] for f in farm_list], dtype=np.float32)),
+                "start_year": (("farm",), np.array([f["start_year"] for f in farm_list], dtype=np.float32)),
+                "is_asbuilt": (("farm",), np.array([f["is_asbuilt"] for f in farm_list], dtype=bool)),
+            },
+            coords={
+                "farm": np.array([f["farm_id"] for f in farm_list], dtype="U"),
+                "time": time_coords,
+                "country": (("farm",), np.array([f["country"] for f in farm_list], dtype="U")),
+                "area": (("farm",), np.array([f["area"] for f in farm_list], dtype="U")),
+                "status": (("farm",), np.array([f["status"] for f in farm_list], dtype="U")),
+            },
+            attrs={
+                "year": ms.year,
+                "month_number": ms.month_number,
+                "month_name": ms.month_name,
+                "description": "Per-farm wind generation timeseries with metadata",
+                "note": "power_mw_2025 includes all farms with correction factor applied; is_asbuilt indicates farms in as-built scenario",
+            },
+        )
+        
+        out_file = self.out_dir / f"{ms.month_number}_{ms.year}_wind_farm_timeseries.nc"
+        if out_file.exists():
+            out_file.unlink()
+        self._write_farm_netcdf_atomic(ds, out_file)
+        print(f"Wrote {out_file} ({n_farms} farms)", flush=True)
     def _align_series(model_vals: np.ndarray, time_vals: np.ndarray, actual: pd.Series) -> tuple[pd.Series, pd.Series]:
         model = pd.Series(model_vals, index=pd.to_datetime(time_vals).tz_localize("UTC"))
         if len(actual) == 0:
@@ -541,14 +810,36 @@ class MonthlyRunner:
         wind_asbuilt_all = []
         wind_2025_all = []
         areas = []
+        
+        # For per-farm outputs
+        pv_meta_all = []
+        pv_farms_all = []
+        pv_factors_all = []
+        wind_meta_all = []
+        wind_farms_all = []
+        wind_factors_all = []
 
         for country, code in zip(countries_tracker, countries_codes):
-            pv_as, pv_25, pv_factor = self.pv.country_timeseries(
-                ms, pv_ds, pv_indexer, self.actual_loader, actual_file, country, code
-            )
-            w_as, w_25, w_factor = self.wind.country_timeseries(
-                ms, wind_ds, wind_indexer, self.actual_loader, actual_file, country, code
-            )
+            if self.write_farm_timeseries:
+                pv_as, pv_25, pv_factor, pv_meta, pv_farms = self.pv.country_timeseries(
+                    ms, pv_ds, pv_indexer, self.actual_loader, actual_file, country, code, return_farm_data=True
+                )
+                w_as, w_25, w_factor, w_meta, w_farms = self.wind.country_timeseries(
+                    ms, wind_ds, wind_indexer, self.actual_loader, actual_file, country, code, return_farm_data=True
+                )
+                pv_meta_all.append(pv_meta)
+                pv_farms_all.append(pv_farms)
+                pv_factors_all.append(pv_factor)
+                wind_meta_all.append(w_meta)
+                wind_farms_all.append(w_farms)
+                wind_factors_all.append(w_factor)
+            else:
+                pv_as, pv_25, pv_factor = self.pv.country_timeseries(
+                    ms, pv_ds, pv_indexer, self.actual_loader, actual_file, country, code
+                )
+                w_as, w_25, w_factor = self.wind.country_timeseries(
+                    ms, wind_ds, wind_indexer, self.actual_loader, actual_file, country, code
+                )
 
             self.plotting_timeseries(
                 ms=ms,
@@ -603,6 +894,17 @@ class MonthlyRunner:
         out.to_netcdf(out_file, engine="h5netcdf")
         print(f"Wrote {out_file}", flush=True)
 
+        # Write per-farm outputs if requested
+        if self.write_farm_timeseries:
+            self._write_pv_farm_timeseries(
+                ms, pv_ds["time"].values, pv_meta_all, pv_farms_all, pv_factors_all,
+                countries_tracker, countries_codes
+            )
+            self._write_wind_farm_timeseries(
+                ms, wind_ds["valid_time"].values, wind_meta_all, wind_farms_all, wind_factors_all,
+                countries_tracker, countries_codes
+            )
+
         # Cleanup
         pv_ds.close()
         wind_ds.close()
@@ -620,6 +922,8 @@ def main():
     p.add_argument("--month", required=True, help="Month number: 01..12")
     p.add_argument("--n-jobs-pv", type=int, default=8)
     p.add_argument("--out-dir", default="/Data/gfi/vindenergi/nab015/energy_country_timeseries")
+    p.add_argument("--write-farm-timeseries", action="store_true", 
+                   help="Write per-farm timeseries outputs in addition to aggregated country/area outputs")
     args = p.parse_args()
 
     month_number = args.month.zfill(2)
@@ -627,7 +931,11 @@ def main():
     if month_name is None:
         raise ValueError(f"Invalid month {args.month}; expected 01..12")
 
-    runner = MonthlyRunner(out_dir=Path(args.out_dir) / args.year, n_jobs_pv=args.n_jobs_pv)
+    runner = MonthlyRunner(
+        out_dir=Path(args.out_dir) / args.year, 
+        n_jobs_pv=args.n_jobs_pv,
+        write_farm_timeseries=args.write_farm_timeseries
+    )
     runner.run_month(MonthSpec(year=args.year, month_number=month_number, month_name=month_name))
 
 
