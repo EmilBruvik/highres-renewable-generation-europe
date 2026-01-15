@@ -2,7 +2,7 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2024 --month 09
+# python -u scripts/weather_energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
 # for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
 # disown
@@ -22,6 +22,8 @@ from typing import Iterable, Tuple
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import xarray as xr
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
@@ -338,7 +340,7 @@ class WindCalculator:
         ds.load()
         return ds
 
-def country_timeseries(
+    def country_timeseries(
         self,
         ms: MonthSpec,
         xrds: xr.Dataset,
@@ -440,6 +442,86 @@ class MonthlyRunner:
         self.pv = PVCalculator(n_jobs=n_jobs_pv)
         self.wind = WindCalculator()
 
+    @staticmethod
+    def _align_series(model_vals: np.ndarray, time_vals: np.ndarray, actual: pd.Series) -> tuple[pd.Series, pd.Series]:
+        model = pd.Series(model_vals, index=pd.to_datetime(time_vals).tz_localize("UTC"))
+        if len(actual) == 0:
+            return model, actual
+        if actual.index.tz is None:
+            actual = actual.copy()
+            actual.index = actual.index.tz_localize("UTC")
+        else:
+            model.index = model.index.tz_convert(actual.index.tz)
+        common = actual.index.intersection(model.index)
+        return model.loc[common], actual.loc[common]
+
+    def plotting_timeseries(
+        self,
+        ms: MonthSpec,
+        area_code: str,
+        country: str,
+        pv_model: np.ndarray,
+        pv_time: np.ndarray,
+        wind_model: np.ndarray,
+        wind_time: np.ndarray,
+        pv_factor: float,
+        wind_factor: float,
+        actual_file: pd.DataFrame,
+    ) -> None:
+        label = area_code if area_code in ZONES else country
+
+        # PV plot
+        solar_actual = self.actual_loader.solar_series_mw(actual_file, area_code)
+        pv_model_series, solar_actual_series = self._align_series(pv_model, pv_time, solar_actual)
+
+        pv_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/pv_power_comparison/{ms.year}/{ms.month_number}")
+        pv_dir.mkdir(parents=True, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(pv_model_series.index, pv_model_series.values, "x-", color="red", label="Estimated PV (MW)")
+        if len(solar_actual_series) > 0:
+            ax.plot(solar_actual_series.index, solar_actual_series.values, "--", color="black", label="Actual PV (MW)")
+        ax.text(0.02, 0.95, f"α={pv_factor:.4f}", transform=ax.transAxes, va="top")
+        if len(solar_actual_series) > 1:
+            corr = solar_actual_series.corr(pv_model_series)
+            if pd.notna(corr):
+                ax.text(0.02, 0.88, f"R²={corr**2:.4f}", transform=ax.transAxes, va="top")
+        ax.set_title(f"PV power {label} {ms.month_number}-{ms.year}")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Power (MW)")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        ax.legend(loc="upper right")
+        ax.grid(True)
+        pv_out = pv_dir / f"pv_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
+        fig.savefig(pv_out, bbox_inches="tight")
+        plt.close(fig)
+
+        # Wind plot
+        wind_actual = self.actual_loader.wind_series_mw(actual_file, area_code)
+        wind_model_series, wind_actual_series = self._align_series(wind_model, wind_time, wind_actual)
+
+        wind_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/wind_power_comparison/{ms.year}/{ms.month_number}")
+        wind_dir.mkdir(parents=True, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(wind_model_series.index, wind_model_series.values, "x-", color="red", label="Estimated Wind (MW)")
+        if len(wind_actual_series) > 0:
+            ax.plot(wind_actual_series.index, wind_actual_series.values, "--", color="black", label="Actual Wind (MW)")
+        ax.text(0.02, 0.95, f"α={wind_factor:.4f}", transform=ax.transAxes, va="top")
+        if len(wind_actual_series) > 1:
+            corr = wind_actual_series.corr(wind_model_series)
+            if pd.notna(corr):
+                ax.text(0.02, 0.88, f"R²={corr**2:.4f}", transform=ax.transAxes, va="top")
+        ax.set_title(f"Wind power {label} {ms.month_number}-{ms.year}")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("Power (MW)")
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        ax.legend(loc="upper right")
+        ax.grid(True)
+        wind_out = wind_dir / f"wind_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
+        fig.savefig(wind_out, bbox_inches="tight")
+        plt.close(fig)
+
     def run_month(self, ms: MonthSpec) -> Path:
         print(f"\n=== Running {ms.year}-{ms.month_number} ({ms.month_name}) ===", flush=True)
 
@@ -466,6 +548,19 @@ class MonthlyRunner:
             )
             w_as, w_25, w_factor = self.wind.country_timeseries(
                 ms, wind_ds, wind_indexer, self.actual_loader, actual_file, country, code
+            )
+
+            self.plotting_timeseries(
+                ms=ms,
+                area_code=code,
+                country=country,
+                pv_model=pv_as,
+                pv_time=pv_ds["time"].values,
+                wind_model=w_as,
+                wind_time=wind_ds["valid_time"].values,
+                pv_factor=pv_factor,
+                wind_factor=w_factor,
+                actual_file=actual_file,
             )
 
             # include areas even if empty so dimensions are consistent
