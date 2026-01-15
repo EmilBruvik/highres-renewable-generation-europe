@@ -521,6 +521,8 @@ class MonthlyRunner:
         all_meta: list[pd.DataFrame],
         all_farms: list[list],
         correction_factors: list[float],
+        countries: list[str],
+        area_codes: list[str],
     ):
         """Write per-farm PV timeseries to NetCDF."""
         # Collect all farms across areas
@@ -528,8 +530,8 @@ class MonthlyRunner:
         for area_idx, (df_meta, farm_ts_list) in enumerate(zip(all_meta, all_farms)):
             if len(df_meta) == 0:
                 continue
-            area_code = countries_codes[area_idx]
-            country = countries_tracker[area_idx]
+            area_code = area_codes[area_idx]
+            country = countries[area_idx]
             factor = correction_factors[area_idx]
             
             for i, ts_w in farm_ts_list:
@@ -537,7 +539,8 @@ class MonthlyRunner:
                 # Convert watts to MW and apply correction factor
                 ts_mw = (ts_w / 1_000_000.0) * factor
                 
-                farm_id = f"{country}_{area_code}_{row.name}"
+                # Use original dataframe index position for stable ID
+                farm_id = f"{country}_{area_code}_{df_meta.index[i]}"
                 farm_list.append({
                     "farm_id": farm_id,
                     "country": country,
@@ -607,6 +610,8 @@ class MonthlyRunner:
         all_meta: list[pd.DataFrame],
         all_farms: list[list],
         correction_factors: list[float],
+        countries: list[str],
+        area_codes: list[str],
     ):
         """Write per-farm wind timeseries to NetCDF."""
         # Collect all farms across areas
@@ -614,8 +619,8 @@ class MonthlyRunner:
         for area_idx, (df_meta, farm_ts_list) in enumerate(zip(all_meta, all_farms)):
             if len(df_meta) == 0:
                 continue
-            area_code = countries_codes[area_idx]
-            country = countries_tracker[area_idx]
+            area_code = area_codes[area_idx]
+            country = countries[area_idx]
             factor = correction_factors[area_idx]
             
             for i, ts_mw in farm_ts_list:
@@ -623,7 +628,8 @@ class MonthlyRunner:
                 # Apply correction factor
                 ts_mw_corrected = ts_mw * factor
                 
-                farm_id = f"{country}_{area_code}_{row.name}"
+                # Use original dataframe index position for stable ID
+                farm_id = f"{country}_{area_code}_{df_meta.index[i]}"
                 farm_list.append({
                     "farm_id": farm_id,
                     "country": country,
@@ -778,8 +784,14 @@ class MonthlyRunner:
 
         # Write per-farm outputs if requested
         if self.write_farm_timeseries:
-            self._write_pv_farm_timeseries(ms, pv_ds["time"].values, pv_meta_all, pv_farms_all, pv_factors_all)
-            self._write_wind_farm_timeseries(ms, wind_ds["valid_time"].values, wind_meta_all, wind_farms_all, wind_factors_all)
+            self._write_pv_farm_timeseries(
+                ms, pv_ds["time"].values, pv_meta_all, pv_farms_all, pv_factors_all,
+                countries_tracker, countries_codes
+            )
+            self._write_wind_farm_timeseries(
+                ms, wind_ds["valid_time"].values, wind_meta_all, wind_farms_all, wind_factors_all,
+                countries_tracker, countries_codes
+            )
 
         # Cleanup
         pv_ds.close()
