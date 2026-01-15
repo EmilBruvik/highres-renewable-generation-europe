@@ -16,6 +16,7 @@ import os
 os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
 import gc
+import hashlib
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -514,6 +515,14 @@ class MonthlyRunner:
                 tmp_path.unlink()
             raise
 
+    @staticmethod
+    def _generate_farm_id(country: str, area_code: str, lat: float, lon: float, capacity: float) -> str:
+        """Generate a stable farm ID based on location and capacity."""
+        # Create a hash from lat, lon, and capacity for uniqueness
+        id_str = f"{lat:.6f}_{lon:.6f}_{capacity:.3f}"
+        hash_suffix = hashlib.md5(id_str.encode()).hexdigest()[:8]
+        return f"{country}_{area_code}_{hash_suffix}"
+
     def _write_pv_farm_timeseries(
         self,
         ms: MonthSpec,
@@ -539,8 +548,12 @@ class MonthlyRunner:
                 # Convert watts to MW and apply correction factor
                 ts_mw = (ts_w / 1_000_000.0) * factor
                 
-                # Use original dataframe index position for stable ID
-                farm_id = f"{country}_{area_code}_{df_meta.index[i]}"
+                # Generate stable farm ID based on location and capacity
+                farm_id = self._generate_farm_id(
+                    country, area_code,
+                    float(row["Latitude"]), float(row["Longitude"]),
+                    float(row["Capacity (MW)"])
+                )
                 farm_list.append({
                     "farm_id": farm_id,
                     "country": country,
@@ -628,8 +641,12 @@ class MonthlyRunner:
                 # Apply correction factor
                 ts_mw_corrected = ts_mw * factor
                 
-                # Use original dataframe index position for stable ID
-                farm_id = f"{country}_{area_code}_{df_meta.index[i]}"
+                # Generate stable farm ID based on location and capacity
+                farm_id = self._generate_farm_id(
+                    country, area_code,
+                    float(row["Latitude"]), float(row["Longitude"]),
+                    float(row["Capacity (MW)"])
+                )
                 farm_list.append({
                     "farm_id": farm_id,
                     "country": country,
