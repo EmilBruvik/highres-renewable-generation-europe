@@ -4,6 +4,8 @@
 #-----------Run commands----------------#
 # python -u scripts/weather_energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
 # for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
+
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
 # disown
 # set -e; for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
@@ -37,10 +39,10 @@ if "functions" in sys.modules:
     del sys.modules["functions"]
 
 import functions
-import inspect
-print("functions module file:", functions.__file__, flush=True)
-print("estimate_power_final sig:", inspect.signature(functions.estimate_power_final), flush=True)
-print("weather_energy_monthly.py file:", __file__, flush=True)
+# import inspect
+# print("functions module file:", functions.__file__, flush=True)
+# print("estimate_power_final sig:", inspect.signature(functions.estimate_power_final), flush=True)
+# print("weather_energy_monthly.py file:", __file__, flush=True)
 
 # python -u scripts/weather_energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
 
@@ -712,6 +714,7 @@ class MonthlyRunner:
             out_file.unlink()
         self._write_farm_netcdf_atomic(ds, out_file)
         print(f"Wrote {out_file} ({n_farms} farms)", flush=True)
+    @staticmethod
     def _align_series(model_vals: np.ndarray, time_vals: np.ndarray, actual: pd.Series) -> tuple[pd.Series, pd.Series]:
         model = pd.Series(model_vals, index=pd.to_datetime(time_vals).tz_localize("UTC"))
         if len(actual) == 0:
