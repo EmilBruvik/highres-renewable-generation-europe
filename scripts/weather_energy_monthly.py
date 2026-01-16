@@ -87,25 +87,34 @@ class MonthSpec:
 
 
 class GridIndexer:
+    """
+    Robust KDTree indexer handling longitude wrapping (0-360 vs -180-180).
+    Builds a tree with 3 copies of the grid (L-360, L, L+360) to ensure
+    Euclidean nearest neighbor works correctly across the dateline/seam.
+    """
     def __init__(self, lat2d: np.ndarray, lon2d: np.ndarray):
-        self.lat2d = lat2d
-        self.lon2d = lon2d
         self.shape = lat2d.shape
-
-        pts0 = np.column_stack((lat2d.ravel(), lon2d.ravel()))
-        pts360 = np.column_stack((lat2d.ravel(), lon2d.ravel() + 360.0))
-        self.tree0 = cKDTree(pts0)
-        self.tree360 = cKDTree(pts360)
+        self.n_points = lat2d.size
+        
+        lon_norm = lon2d.ravel() % 360.0
+        lat_flat = lat2d.ravel()
+        
+        p_main = np.column_stack((lat_flat, lon_norm))
+        p_left = np.column_stack((lat_flat, lon_norm - 360.0))
+        p_right = np.column_stack((lat_flat, lon_norm + 360.0))
+        
+        self.tree = cKDTree(np.vstack((p_main, p_left, p_right)))
 
     def map_points(self, lat: np.ndarray, lon: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        pts0 = np.column_stack((lat, lon))
-        pts1 = np.column_stack((lat, lon + 360.0))
-        d0, idx0 = self.tree0.query(pts0, k=1)
-        d1, idx1 = self.tree360.query(pts1, k=1)
-        idx = np.where(d0 <= d1, idx0, idx1).astype(int)
-        y, x = np.unravel_index(idx, self.shape)
+        # Normalize query longitude to 0-360
+        lon_q = lon % 360.0
+        pts = np.column_stack((lat, lon_q))
+        
+        _, idx = self.tree.query(pts, k=1)
+        
+        idx_orig = idx % self.n_points
+        y, x = np.unravel_index(idx_orig, self.shape)
         return y.astype(int), x.astype(int)
-
 
 class ActualGenerationLoader:
     def __init__(self, timezone_mapping: dict):
@@ -217,7 +226,6 @@ class PVCalculator:
         area_code: str,
         return_farm_data: bool = True,
     ):
-        # Filter dataframe
         df_country = pd.concat(
             [
                 self.df_20[self.df_20["Country/Area"] == country],
@@ -240,25 +248,25 @@ class PVCalculator:
         if len(df_country) == 0:
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
-        # Operating only
         op_status = set(functions.operating_farms(country, "solar"))
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
         
+        df_country["Latitude"] = pd.to_numeric(df_country["Latitude"], errors="coerce")
+        df_country["Longitude"] = pd.to_numeric(df_country["Longitude"], errors="coerce")
+        df_country = df_country.dropna(subset=["Latitude", "Longitude"])
+
         if len(df_country) == 0:
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
-        # Actual generation for calibration
         solar_actual = actual_loader.solar_series_mw(actual_file, area_code)
 
-        # Map locations
-        lat = df_country["Latitude"].astype(float).to_numpy()
-        lon = df_country["Longitude"].astype(float).to_numpy()
+        lat = df_country["Latitude"].to_numpy()
+        lon = df_country["Longitude"].to_numpy()
         y_idx, x_idx = indexer.map_points(lat, lon)
         
         df_country['y_idx'] = y_idx
         df_country['x_idx'] = x_idx
 
-        # Start year check
         start_year = pd.to_numeric(df_country["Start year"], errors="coerce").to_numpy()
         asbuilt_mask = np.isfinite(start_year) & (start_year <= ms.prod_year)
 
@@ -378,23 +386,25 @@ class WindCalculator:
                     mask |= df_country[col].isin(zone_cities)
             df_country = df_country[mask].copy()
 
-        # Operating only
         op_status = set(functions.operating_farms(country, "wind"))
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
+        
+        df_country["Latitude"] = pd.to_numeric(df_country["Latitude"], errors="coerce")
+        df_country["Longitude"] = pd.to_numeric(df_country["Longitude"], errors="coerce")
+        df_country = df_country.dropna(subset=["Latitude", "Longitude"])
+
         if len(df_country) == 0:
              return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         wind_actual = actual_loader.wind_series_mw(actual_file, area_code)
 
-        # Mapping
-        lat = df_country["Latitude"].astype(float).to_numpy()
-        lon = df_country["Longitude"].astype(float).to_numpy()
+        lat = df_country["Latitude"].to_numpy()
+        lon = df_country["Longitude"].to_numpy()
         y_idx, x_idx = indexer.map_points(lat, lon)
         
         df_country['y_idx'] = y_idx
         df_country['x_idx'] = x_idx
 
-        # Modeling logic
         start_year_f = pd.to_numeric(df_country["Start year"], errors="coerce").to_numpy(dtype=float)
         asbuilt_mask = (
             np.isfinite(start_year_f)
