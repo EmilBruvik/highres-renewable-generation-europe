@@ -170,8 +170,11 @@ def interpolate_idw(xrds, lat, lon, var, y_idx, x_idx, ref_height_idx, neighbors
     return interpolated_series
 
 def estimate_wind_power(country, lat, lon, capacity, startyear, prod_year, status, installation_type, xrds, 
-                        y_idx, x_idx, wts_smoothing=False, spatial_interpolation=False, wake_loss_factor=None, single_turb_curve = False, verbose=True): 
-    if status not in operating_farms(country, "wind") or (isinstance(startyear, (int, float)) and startyear > prod_year):
+                        y_idx, x_idx, wts_smoothing=False, spatial_interpolation=False, wake_loss_factor=None, single_turb_curve = False, enforce_start_year=False, verbose=True): 
+    
+    if status not in operating_farms(country, "wind"):
+        return None
+    if enforce_start_year and (isinstance(startyear, (int, float)) and startyear > prod_year):
         return None
     
     try:
@@ -256,7 +259,7 @@ def get_correction_factor(calc_series, act_series):
 
     median_ratio = ratios.median()
 
-    factor_mask = (ratios > median_ratio * 0.9) & (ratios < median_ratio * 1.1)
+    factor_mask = (ratios > median_ratio * 0.7) & (ratios < median_ratio * 1.3)
     if factor_mask.sum() > 10:
         clean_calc = calc_series[valid_hours][factor_mask]
         clean_actual = act_series[valid_hours][factor_mask]
@@ -271,7 +274,7 @@ def get_correction_factor(calc_series, act_series):
 def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status, tech_type, xrds,
                          y_idx, x_idx, Spatial_interpolation, min_irr, twilight_zenith_limit, 
                          smoothing_window_hours=None, performance_ratio=0.85, 
-                         start_year=None, prod_year=None, mounting_type='default'):
+                         start_year=None, prod_year=None, enforce_start_year=False, mounting_type='default'):
     """
     Estimates solar farm power production by dispatching to the correct model based on technology type.
 
@@ -297,7 +300,9 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
     # if status in ['canceled', 'pre-construction', 'announced', 'construction']: #'shelved - inferred 2 y', 'shelved']:
     #     return None
 
-    if status not in operating_farms(country, "solar") or (isinstance(start_year, (int, float)) and start_year > prod_year):
+    if status not in operating_farms(country, "solar"):
+        return None
+    if enforce_start_year and isinstance(start_year, (int, float)) and start_year > prod_year:
         return None
     
     if Spatial_interpolation == True:
@@ -381,7 +386,7 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
             # Single-axis tracking calculation
             tracker_data = pvlib.tracking.singleaxis(
                 apparent_zenith=solar_position['apparent_zenith'],
-                apparent_azimuth=solar_position['azimuth'],
+                solar_azimuth=solar_position['azimuth'],
                 axis_tilt=0,  # Horizontal axis
                 axis_azimuth=180,  # N-S axis
                 max_angle=60,
@@ -813,3 +818,23 @@ def get_correction_factor(calc_series, act_series):
         factor = act_series.sum() / calc_series.sum()
         
     return factor
+
+# def timeseries_plot(actual_series, calculated_series, output_dir, renewable_type, factor, r_squared):
+#     fig, ax = plt.subplots(figsize=(16, 7))
+#     ax.plot(calculated_series.index, calculated_series.values, "x-", label=f"Estimated {renewable_type} Power (MW) as-built", color="red")
+#     ax.plot(actual_series.index, actual_series.values, label=f"Actual {renewable_type} Power (MW)", alpha=0.7, linestyle="--", color="black")
+#     ax.text(0.15, 0.95, fr"$\alpha = $ {factor:.4f}", transform=ax.transAxes, fontsize=16, va="top")
+#     if not pd.isna(r_squared):
+#         ax.text(0.15, 0.90, fr"$R^2 = $ {r_squared:.4f}", transform=ax.transAxes, fontsize=16, va="top")
+
+#     ax.set_xlabel("Time")
+#     ax.set_ylabel("Power (MW)")
+#     ax.set_title(f"{renewable_type} Power Generation for {COUNTRY_CODE} - {month_number}-{YEAR}")
+#     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+#     ax.grid(True)
+#     ax.legend(loc="upper right")
+
+#     out_svg = fig_dir / f"{renewable_type.lower()}_power_comparison_{month_number}_{YEAR}_{COUNTRY_CODE}.svg"
+#     plt.savefig(out_svg, bbox_inches="tight", dpi=300)
+#     plt.close(fig)
+#     print(f"Figure saved to {out_svg}", flush=True)
