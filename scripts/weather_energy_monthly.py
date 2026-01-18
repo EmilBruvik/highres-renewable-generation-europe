@@ -2,8 +2,8 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2024 --month 09 --n-jobs-pv 2
-# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# python -u scripts/weather_energy_monthly.py --year 2021 --month 06 --n-jobs-pv 4
+# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 4; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
@@ -19,6 +19,7 @@ os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 import gc
 import tempfile
 from dataclasses import dataclass
+from tqdm import tqdm
 from pathlib import Path
 from typing import Tuple
 import numpy as np
@@ -37,7 +38,6 @@ if "functions" in sys.modules:
 
 import functions
 
-# Constants
 MONTHS = [
     ("01", "jan"), ("02", "feb"), ("03", "mar"), ("04", "apr"),
     ("05", "may"), ("06", "jun"), ("07", "jul"), ("08", "aug"),
@@ -115,6 +115,7 @@ class GridIndexer:
         idx_orig = idx % self.n_points
         y, x = np.unravel_index(idx_orig, self.shape)
         return y.astype(int), x.astype(int)
+
 
 class ActualGenerationLoader:
     def __init__(self, timezone_mapping: dict):
@@ -298,7 +299,7 @@ class PVCalculator:
             return (i, np.asarray(ts.values, dtype=np.float64))
 
         farms = Parallel(n_jobs=self.n_jobs, backend="threading", verbose=0)(
-            delayed(compute_farm)(i) for i in range(len(df_country))
+            delayed(compute_farm)(i) for i in tqdm(range(len(df_country)), desc=f"Estimating solar power for {country}", unit="farm")
         )
 
         watts_2025 = np.zeros(T, dtype=np.float64)
@@ -419,7 +420,7 @@ class WindCalculator:
         mw_asbuilt = np.zeros(T, dtype=np.float64)
         farm_results = []
 
-        for i in range(len(df_country)):
+        for i in tqdm(range(len(df_country)), desc=f"Estimating wind power for {country}", unit="farm"):
             row = df_country.iloc[i]
             ts_mw = functions.estimate_wind_power(
                 country=country,
@@ -483,7 +484,12 @@ class MonthlyRunner:
 
     @staticmethod
     def _write_atomic(ds: xr.Dataset, out_path: Path):
-        """Write NetCDF with atomic write."""
+        """Write NetCDF with atomic write and COMPRESSION."""
+        
+        # Define compression settings for every data variable
+        comp = dict(zlib=True, complevel=4)
+        encoding = {var: comp for var in ds.data_vars}
+
         with tempfile.NamedTemporaryFile(
             mode="wb",
             delete=False,
@@ -493,7 +499,7 @@ class MonthlyRunner:
         ) as tmp:
             tmp_path = Path(tmp.name)
         try:
-            ds.to_netcdf(tmp_path, engine="h5netcdf")
+            ds.to_netcdf(tmp_path, engine="h5netcdf", encoding=encoding)
             os.replace(tmp_path, out_path)
         except Exception:
             if tmp_path.exists():
@@ -584,30 +590,23 @@ class MonthlyRunner:
 
         actual_file = self.actual_loader.load_month_file(ms.year, ms.month_number)
 
-        # 1. Open Weather Data
-        # PV Dataset
-        pv_ds = self.pv.open_weather(ms)
+        pv_ds = self.pv.open_weather(ms) #open PV dataset
         pv_indexer = GridIndexer(pv_ds["latitude"].values, pv_ds["longitude"].values)
         
-        # Wind Dataset
-        wind_ds = self.wind.open_weather(ms)
+        wind_ds = self.wind.open_weather(ms) #open Wind dataset
         wind_indexer = GridIndexer(wind_ds["latitude"].values, wind_ds["longitude"].values)
 
-        # 2. Initialize Grids (Float32 to save memory)
-        # Dimensions: [Time, Y, X]
+        #2. Initialize Grids (Float32 to save memory)
+        #Dimensions: [Time, Y, X]
         print("Initializing global grids...", flush=True)
         T_pv = pv_ds.sizes["time"]
         Y_dim = pv_ds.sizes["y"]
         X_dim = pv_ds.sizes["x"]
         
-        # Assuming grid dimensions are same for PV and Wind (CERRA)
-        # But Time might slightly differ in metadata name (valid_time vs time)
-        # We will use PV coordinates for the final output grid
-        
-        global_pv_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
-        global_wind_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        grid_pv = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        grid_wind_on = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        grid_wind_off = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
 
-        # 3. Aggregation Lists
         pv_asbuilt_all = []
         pv_2025_all = []
         wind_asbuilt_all = []
@@ -626,8 +625,7 @@ class MonthlyRunner:
             pv_asbuilt_all.append(pv_as)
             pv_2025_all.append(pv_25)
 
-            # Accumulate to global grid (Apply factor, convert Watts to MW if needed)
-            # PVCalculator returns farm timeseries in Watts
+            # Accumulate to global grid (Apply factor, convert Watts to MW)
             if pv_farms:
                 for i, ts_watts in pv_farms:
                     y = pv_df_country.iloc[i]["y_idx"]
@@ -635,7 +633,9 @@ class MonthlyRunner:
                     
                     # Convert W -> MW and apply factor
                     ts_mw = (ts_watts / 1_000_000.0) * pv_factor
-                    global_pv_grid[:, int(y), int(x)] += ts_mw
+                    
+                    # Combine all Solar (PV + CSP) into one variable
+                    grid_pv[:, int(y), int(x)] += ts_mw
 
             # --- Wind Calculation ---
             wind_ret = self.wind.country_timeseries(
@@ -648,19 +648,24 @@ class MonthlyRunner:
             wind_2025_all.append(w_25)
 
             # Accumulate to global grid (Apply factor)
-            # WindCalculator returns farm timeseries in MW
             if w_farms:
                 for i, ts_mw_unc in w_farms:
                     y = w_df_country.iloc[i]["y_idx"]
                     x = w_df_country.iloc[i]["x_idx"]
                     
+                    inst_type = str(w_df_country.iloc[i]["Installation Type"]).lower()
+                    
                     # Apply factor
                     ts_mw = ts_mw_unc * w_factor
-                    global_wind_grid[:, int(y), int(x)] += ts_mw
+                    
+                    if "offshore" in inst_type:
+                        grid_wind_off[:, int(y), int(x)] += ts_mw
+                    else:
+                        # Default to Onshore
+                        grid_wind_on[:, int(y), int(x)] += ts_mw
 
             areas.append(code)
 
-            # Plots
             self.plotting_timeseries(
                 ms=ms,
                 area_code=code,
@@ -674,7 +679,6 @@ class MonthlyRunner:
                 actual_file=actual_file,
             )
 
-        # 5. Save Aggregated Country Output
         pv_asbuilt = np.stack(pv_asbuilt_all, axis=1)
         pv_2025 = np.stack(pv_2025_all, axis=1)
         wind_asbuilt = np.stack(wind_asbuilt_all, axis=1)
@@ -705,13 +709,12 @@ class MonthlyRunner:
         self._write_atomic(out_agg, out_file_agg)
         print(f"Wrote aggregated file: {out_file_agg}", flush=True)
 
-        # 6. Save Gridded Per-Farm Output
         print("Saving gridded per-farm output...", flush=True)
-        # Using dimensions and coords from pv_ds as reference
-        grid_out = xr.Dataset(
+        grid_out = xr.Dataset( #using dimensions and coords from pv_ds as reference
             {
-                'wind_power_mw': (('time', 'y', 'x'), global_wind_power_grid := global_wind_grid),
-                'pv_power_mw': (('time', 'y', 'x'), global_pv_power_grid := global_pv_grid),
+                'wind_onshore_mw': (('time', 'y', 'x'), grid_wind_on),
+                'wind_offshore_mw': (('time', 'y', 'x'), grid_wind_off),
+                'pv_mw': (('time', 'y', 'x'), grid_pv),
             },
             coords={
                 'time': (('time',), pv_ds['time'].values),
@@ -722,8 +725,7 @@ class MonthlyRunner:
             }
         )
         
-        # Free memory
-        del global_wind_grid, global_pv_grid
+        del grid_wind_on, grid_wind_off, grid_pv #free memory
 
         out_file_grid = self.out_dir_farms / f"{ms.month_number}_{ms.year}_pv_wind_grid.nc"
         if out_file_grid.exists():
@@ -748,9 +750,7 @@ def main():
     p.add_argument("--month", required=True, help="Month number: 01..12")
     p.add_argument("--n-jobs-pv", type=int, default=8)
     
-    # Aggregated output defaults to original path
     p.add_argument("--out-dir", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/country-aggregated-production")
-    # Per-farm output defaults to new request path
     p.add_argument("--out-dir-farm", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/per-farm-production")
     
     args = p.parse_args()

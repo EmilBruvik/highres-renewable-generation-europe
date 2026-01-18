@@ -1,0 +1,45 @@
+# custom_latex_style.mplstyle
+
+# FIGURE
+figure.facecolor: white
+figure.dpi: 100  # Reduced DPI to normal size
+figure.figsize: 16, 10  # Added figure size (width, height in inches)
+figure.titlesize: 14  # Reduced title size
+figure.titleweight: bold
+
+# LINES
+lines.linewidth: 1.5
+
+# PATCHES
+patch.facecolor: 0072B2
+
+# LEGEND
+legend.fontsize: 14  # Reduced legend font size
+
+# TICKS
+xtick.direction: out
+ytick.direction: out
+xtick.labelsize: 14  # Added tick label sizes
+ytick.labelsize: 14
+
+# FONTS
+# Overriding the font to Times
+font.family: serif
+font.serif: Arial, Helvetica
+font.weight: bold
+font.size: 16  # Reduced base font size
+
+# AXES
+axes.grid: False
+axes.facecolor: white
+axes.linewidth: 1.0
+axes.titlesize: 14  # Reduced axes title size
+axes.titleweight: bold
+axes.labelsize: 14  # Reduced label sizes
+axes.labelweight: bold
+axes.spines.top: True
+axes.spines.right: True
+axes.prop_cycle: cycler('color', ['0072B2', '009E73', 'D55E00', 'CC79A7', 'F0E442', '56B4E9'])
+
+# For using LaTeX backend in matplotlib
+text.usetex: True
