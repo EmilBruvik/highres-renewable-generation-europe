@@ -2,7 +2,7 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2021 --month 06 --n-jobs-pv 4
+# python -u scripts/weather_energy_monthly.py --year 2024 --month 03 --n-jobs-pv 4
 # for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 4; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
