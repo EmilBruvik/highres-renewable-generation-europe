@@ -556,7 +556,7 @@ class MonthlyRunner:
         ax.legend(loc="upper right")
         ax.grid(True)
         pv_out = pv_dir / f"pv_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
-        fig.savefig(pv_out, bbox_inches="tight")
+        fig.savefig(pv_out, bbox_inches="tight", dpi=300)
         plt.close(fig)
 
         # Wind plot
@@ -582,7 +582,7 @@ class MonthlyRunner:
         ax.legend(loc="upper right")
         ax.grid(True)
         wind_out = wind_dir / f"wind_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
-        fig.savefig(wind_out, bbox_inches="tight")
+        fig.savefig(wind_out, bbox_inches="tight", dpi=300)
         plt.close(fig)
 
     def run_month(self, ms: MonthSpec) -> Path:
@@ -733,7 +733,6 @@ class MonthlyRunner:
         self._write_atomic(grid_out, out_file_grid)
         print(f"Wrote gridded file: {out_file_grid}", flush=True)
 
-        # Cleanup
         pv_ds.close()
         wind_ds.close()
         del pv_ds, wind_ds, pv_indexer, wind_indexer, out_agg, grid_out
