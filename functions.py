@@ -7,43 +7,52 @@ from turbine_models.parser import Turbines
 from scipy.stats import norm
 from scipy.interpolate import CubicSpline, interp1d, PchipInterpolator
 
-def map_turbine_model(start_year: int, installation_type: str) -> str:
+def map_turbine_model(start_year: int, installation_type: str):
     """
-    Map a wind farm's start year to an appropriate turbine model
-    based on representative technology level for either onshore or offshore.
-    Uses models available in the provided turbine library.
+    Map a wind farm's start year to an appropriate turbine model AND 
+    a representative hub height.
+    
+    Returns:
+        tuple: (model_string, hub_height_meters)
     """
-    if installation_type == "Onshore" or installation_type == "Unknown" or pd.isna(installation_type):
-        if start_year <= 2005:
-            return "VestasV47_660kW_47"  # Early commercial model
+    # Handle NaNs or missing types
+    if pd.isna(installation_type) or installation_type == "Unknown":
+        installation_type = "Onshore"
+
+    if installation_type == "Onshore":
+        # Onshore: Trend towards taller towers to capture higher shear
+        if start_year <= 2000:
+            return "VestasV47_660kW_47", 65.0 
+        elif start_year <= 2005:
+            return "DOE_GE_1.5MW_77", 80.0
         elif start_year <= 2010:
-            return "DOE_GE_1.5MW_77"  # Represents the highly common 1.5MW class
+            return "DOE_GE_1.5MW_77", 90.0 
         elif start_year <= 2015:
-            return "2017COE_Market_Average_2.3MW_113"  # Market average proxy
+            return "2017COE_Market_Average_2.3MW_113", 100.0
         elif start_year <= 2018:
-            return "IEA_Reference_3.4MW_130"  # More modern reference for this period
+            return "IEA_Reference_3.4MW_130", 125.0
         elif start_year <= 2021:
-            return "2020ATB_NREL_Reference_4MW_150"  # NREL reference for ~4MW class
-        else: # for 2022 and later
-            return "2023NREL_Bespoke_6MW_170"  # A modern, large onshore turbine
+            return "2020ATB_NREL_Reference_4MW_150", 135.0
+        else: 
+            return "2023NREL_Bespoke_6MW_170", 150.0
+
     elif installation_type == "Offshore floating":
-        if start_year <= 2018:
-            return "IEA_Reference_6MW_100" 
-        elif start_year <= 2021:
-            return '2023NREL_Bespoke_8.3MW_196' # Mid-generation floating model
+        if start_year <= 2020:
+            return "IEA_Reference_6MW_100", 110.0
         else:
-            return 'DTU_Reference_v1_10MW_178'
-    else:  # Offshore models
-        if start_year <= 2010:
-            return "NREL_Reference_5MW_126"  # Foundational reference model
-        elif start_year <= 2014:
-            return "LEANWIND_Reference_8MW_164"  # Representative of the ~8MW class
-        elif start_year <= 2017:
-            return "DTU_Reference_v1_10MW_178"  # 10MW models became reference standard
-        elif start_year <= 2020:
-            return "2019ORCost_NREL_Reference_12MW_222"  # Moving into the 12MW class
-        else: # for 2021 and later
-            return "IEA_Reference_15MW_240"  # 15MW class as a benchmark for modern turbines
+            return "DTU_Reference_v1_10MW_178", 130.0
+
+    else:  
+        if start_year <= 2005:
+            return "NREL_Reference_5MW_126", 70.0 # Early offshore (Bonus/Siemens)
+        elif start_year <= 2010:
+            return "NREL_Reference_5MW_126", 90.0
+        elif start_year <= 2015:
+            return "LEANWIND_Reference_8MW_164", 100.0 # Siemens 3.6/4.0 era
+        elif start_year <= 2019:
+            return "DTU_Reference_v1_10MW_178", 110.0 # MHI Vestas 8MW era
+        else: 
+            return "IEA_Reference_15MW_240", 140.0
 
 def multi_turb_curve(turb_name, num_turbs, wind_speed_std_dev=1.5):
     turbs = Turbines()
@@ -170,7 +179,9 @@ def interpolate_idw(xrds, lat, lon, var, y_idx, x_idx, ref_height_idx, neighbors
     return interpolated_series
 
 def estimate_wind_power(country, lat, lon, capacity, startyear, prod_year, status, installation_type, xrds, 
-                        y_idx, x_idx, wts_smoothing=False, spatial_interpolation=False, wake_loss_factor=None, single_turb_curve = False, enforce_start_year=False, verbose=True): 
+                        y_idx, x_idx, wts_smoothing=False, power_smoothing=True, 
+                        spatial_interpolation=False, wake_loss_factor=None, 
+                        single_turb_curve = False, enforce_start_year=False, verbose=True): 
     
     if status not in operating_farms(country, "wind"):
         return None
@@ -179,9 +190,9 @@ def estimate_wind_power(country, lat, lon, capacity, startyear, prod_year, statu
     
     try:
         turbs = Turbines()
-        turbine_model = map_turbine_model(startyear, installation_type)
+        turbine_model, mapped_hub_height = map_turbine_model(startyear, installation_type)
         specs = turbs.specs(turbine_model)
-        hub_height = specs['hub_height']
+        hub_height = mapped_hub_height if mapped_hub_height else specs['hub_height']
         rated_power_kw = specs['rated_power']
 
         #Find the index of the height level closest to the hub_height
@@ -194,35 +205,41 @@ def estimate_wind_power(country, lat, lon, capacity, startyear, prod_year, statu
         else:
             wind_ts_ref = xrds['ws'].isel(heightAboveGround=ref_height_idx, y=y_idx, x=x_idx).values
 
-        alpha = 1/7 
+        if installation_type == 'offshore' or installation_type == 'unknown':
+            alpha = 1/7 
+        else:
+            alpha = 0.22
+            
         wind_ts_hub_height = wind_ts_ref * (hub_height / ref_height)**alpha
-
-        # 3. Smooth the calculated hub-height wind time series
         wind_ts_series = pd.Series(wind_ts_hub_height)
+        
         if wts_smoothing:
             wind_ts = wind_ts_series.rolling(window=3, center=True, min_periods=1).mean().values
-        else:
+        else:   
             wind_ts = wind_ts_series.values
         num_turbines = capacity / (rated_power_kw / 1000)
-
-        farm_power_curve = generate_farm_power_curve(turbine_model, num_turbines)
-
-        #Interpolate the farm's power from the smoothed curve
-        total_farm_power_mw = np.interp(
-            wind_ts, 
-            farm_power_curve['wind_speed_ms'], 
-            farm_power_curve['power_kw'] / 1e3
-        )
 
         if single_turb_curve:
             power_curve = turbs.table(turbine_model)
             single_turbine_kw = np.interp(
                 wind_ts, 
                 power_curve['wind_speed_ms'], 
-                power_curve['power_kw']
+                power_curve['power_kw'],
+                left=0, right=rated_power_kw
             )
-            total_farm_power_mw = (single_turbine_kw * num_turbines)# Return power in watts
-
+            total_farm_power_mw = (single_turbine_kw * num_turbines) / 1e3
+        else:
+            farm_power_curve = generate_farm_power_curve(turbine_model, num_turbines)
+            total_farm_power_mw = np.interp(
+                wind_ts, 
+                farm_power_curve['wind_speed_ms'], 
+                farm_power_curve['power_kw'] / 1e3
+        )
+        if power_smoothing:
+            total_farm_power_mw = pd.Series(total_farm_power_mw).rolling(
+                window=6, center=True, min_periods=1
+            ).mean().values
+            
         if wake_loss_factor is not None:
             total_farm_power_mw *= wake_loss_factor
 
@@ -237,11 +254,6 @@ def get_correction_factor(calc_series, act_series):
     Calculates a robust correction factor to scale estimated power to actual power,
     filtering out anomalous periods where the relationship deviates significantly.
 
-    The function calculates the hourly ratio (Actual / Estimated), finds the median
-    ratio to represent the "typical" scaling, and then computes the final factor
-    using only hours where the ratio is within +/- 20% of this median. This prevents
-    outliers (e.g., extreme weather events or data errors) from skewing the calibration.
-
     Parameters:
     -----------
     calc_series : pd.Series
@@ -254,230 +266,211 @@ def get_correction_factor(calc_series, act_series):
     float
         The calculated correction factor.
     """
-    valid_hours = (calc_series > 1) & (act_series > 1)
-    ratios = act_series[valid_hours] / calc_series[valid_hours]
+    valid_hours = (calc_series > 10) & (act_series > 10)
+    if valid_hours.sum() < 10:
+        return 1.0  # No valid data to calculate factor
+    
+    calc_sum = calc_series[valid_hours]
+    calc_act = act_series[valid_hours]
+    factor = calc_act.sum() / calc_sum.sum()
+    # ratios = act_series[valid_hours] / calc_series[valid_hours]
 
-    median_ratio = ratios.median()
+    # median_ratio = ratios.median()
 
-    factor_mask = (ratios > median_ratio * 0.7) & (ratios < median_ratio * 1.3)
-    if factor_mask.sum() > 10:
-        clean_calc = calc_series[valid_hours][factor_mask]
-        clean_actual = act_series[valid_hours][factor_mask]
+    # factor_mask = (ratios > median_ratio * 0.7) & (ratios < median_ratio * 1.3)
+    # if factor_mask.sum() > 10:
+    #     clean_calc = calc_series[valid_hours][factor_mask]
+    #     clean_actual = act_series[valid_hours][factor_mask]
         
-        factor = clean_actual.sum() / clean_calc.sum()
-    else:
-        factor = act_series.sum() / calc_series.sum()
+    #     factor = clean_actual.sum() / clean_calc.sum()
+    # else:
+    #     factor = act_series.sum() / calc_series.sum()
 
     return factor
 
 
 def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status, tech_type, xrds,
-                         y_idx, x_idx, Spatial_interpolation, min_irr, twilight_zenith_limit, 
-                         smoothing_window_hours=None, performance_ratio=0.85, 
+                         y_idx, x_idx, Spatial_interpolation, min_irr, twilight_zenith_limit,
+                         smoothing_window_hours=None, performance_ratio=0.85,
                          start_year=None, prod_year=None, enforce_start_year=False, mounting_type='default'):
-    """
-    Estimates solar farm power production by dispatching to the correct model based on technology type.
-
-    Args:
-        lat (float): Latitude of the solar farm.
-        lon (float): Longitude of the solar farm.
-        capacity_mw (float): Total capacity of the farm in MW.
-        capacity_rating (str): The type of capacity rating ('MWac', 'MWp/dc', 'unknown').
-        status (str): The operational status of the farm.
-        tech_type (str): The technology type ('PV', 'Solar Thermal', etc.).
-        ssrd (xarray.DataArray): Time series of surface solar radiation downards.
-        ws (xarray.DataArray): Time series of 10m wind speed.
-        temp (xarray.DataArray): Time series of 2m temperature.
-        al (xarray.DataArray): Time series of albedo.
-        derate_factor (float, optional): The overall system derate factor for PV. Defaults to 0.95.
-        start_year (int, optional): The year the farm started operation. Used for tracking heuristic.
-        mounting_type (str, optional): 'fixed', 'single_axis', or 'default'. 
-                                       'default' infers based on capacity and year.
-
-    Returns:
-        pandas.Series: Time series of estimated AC power in watts, or None if not operational.
-    """
-    # if status in ['canceled', 'pre-construction', 'announced', 'construction']: #'shelved - inferred 2 y', 'shelved']:
-    #     return None
-
+    
+    # 0. Initial Status Checks
     if status not in operating_farms(country, "solar"):
         return None
     if enforce_start_year and isinstance(start_year, (int, float)) and start_year > prod_year:
         return None
-    
-    if Spatial_interpolation == True:
-        ssrd = interpolate_idw(xrds, lat, lon, 'irradiance', y_idx, x_idx, ref_height_idx=None, neighbors=4)
-        ws = interpolate_idw(xrds, lat, lon, 'wind_speed', y_idx, x_idx, ref_height_idx=None, neighbors=4)  
-        temp = interpolate_idw(xrds, lat, lon, 'temperature', y_idx, x_idx, ref_height_idx=None, neighbors=4)
-    else:
-        ssrd = xrds['irradiance'].isel(y=y_idx, x=x_idx)
-        ws = xrds['wind_speed'].isel(y=y_idx, x=x_idx)
-        temp = xrds['temperature'].isel(y=y_idx, x=x_idx)
-    
-    al = xrds['albedo'].isel(y=y_idx, x=x_idx)
 
-    if tech_type == 'Solar Thermal':
-        return estimate_csp_power(
-            lat=lat,
-            lon=lon,
-            capacity_mw=capacity_mw,
-            status=status,
-            ssrd=ssrd,
-            ws=ws,
-            temp=temp,
-            al=al
-        )
-    
-    # Default to PV calculation for 'PV' and 'Assumed PV'
     try:
-        # 1. Determine DC and AC capacity based on rating
-        dc_ac_ratio = 1.25  # Assumed DC/AC ratio for MWac and unknown capacities
+        # 1. Weather Data Extraction
+        if Spatial_interpolation:
+            ssrd = interpolate_idw(xrds, lat, lon, 'irradiance', y_idx, x_idx, ref_height_idx=None, neighbors=4)
+            ws = interpolate_idw(xrds, lat, lon, 'wind_speed', y_idx, x_idx, ref_height_idx=None, neighbors=4)  
+            temp = interpolate_idw(xrds, lat, lon, 'temperature', y_idx, x_idx, ref_height_idx=None, neighbors=4)
+        else:
+            ssrd = xrds['irradiance'].isel(y=y_idx, x=x_idx)
+            ws = xrds['wind_speed'].isel(y=y_idx, x=x_idx)
+            temp = xrds['temperature'].isel(y=y_idx, x=x_idx)
+
+        al = xrds['albedo'].isel(y=y_idx, x=x_idx)
+
+        # 2. Determine Capacity
+        dc_ac_ratio = 1.25
         if capacity_rating == 'MWac':
             ac_capacity_mw = capacity_mw
             dc_capacity_mw = ac_capacity_mw * dc_ac_ratio
         elif capacity_rating == 'MWp/dc':
             dc_capacity_mw = capacity_mw
-            ac_capacity_mw = dc_capacity_mw / dc_ac_ratio # Estimate AC capacity
-        else:  # 'unknown' or other
-            dc_capacity_mw = capacity_mw * dc_ac_ratio # Assume it's AC or a conservative estimate
+            ac_capacity_mw = dc_capacity_mw / dc_ac_ratio
+        else:
+            dc_capacity_mw = capacity_mw * dc_ac_ratio
             ac_capacity_mw = capacity_mw
 
-        # 2. Prepare weather DataFrame from xarray DataArrays
-        time_idx = ssrd['time'].values
+        # 3. Prepare DataFrame
+        if hasattr(ssrd, 'time'):
+            time_idx = ssrd['time'].values
+            ghi_vals = ssrd.values
+        else:
+            time_idx = xrds['time'].values
+            ghi_vals = ssrd
+
         weather_df = pd.DataFrame(index=pd.to_datetime(time_idx).tz_localize('UTC'))
-        weather_df['ghi'] = ssrd.values
-        weather_df['temp_air'] = temp.values - 273.15
-        weather_df['wind_speed'] = ws.values
-        weather_df['albedo'] = al.values
+        # Safely extract values whether they are xarray, series, or numpy
+        weather_df['ghi'] = ghi_vals if isinstance(ghi_vals, np.ndarray) else ghi_vals.values
+        weather_df['temp_air'] = (temp.values if hasattr(temp, 'values') else temp) - 273.15
+        weather_df['wind_speed'] = ws.values if hasattr(ws, 'values') else ws
+        weather_df['albedo'] = al.values if hasattr(al, 'values') else al
+        
+        # Remove duplicates
+        weather_df = weather_df[~weather_df.index.duplicated(keep='first')]
         weather_df.fillna(0, inplace=True)
+
         if min_irr:
             low_mask = (weather_df['ghi'] > 0) & (weather_df['ghi'] < min_irr)
             weather_df.loc[low_mask, 'ghi'] = min_irr
 
-        # 3. Get solar position and decompose GHI
+        # 4. Solar Position Shift (Geometric Alignment)
+        # Shift -30 mins (Center of accumulation interval)
         location = pvlib.location.Location(latitude=lat, longitude=lon, tz='UTC')
-        solar_position = location.get_solarposition(times=weather_df.index)
+        solar_time_index = weather_df.index - pd.Timedelta(minutes=30)
+        solar_position = location.get_solarposition(times=solar_time_index)
+        
         if twilight_zenith_limit:
             solar_position['zenith'] = solar_position['zenith'].clip(upper=twilight_zenith_limit)
             solar_position['apparent_zenith'] = solar_position['apparent_zenith'].clip(upper=twilight_zenith_limit)
             
-        erbs_model = pvlib.irradiance.erbs(weather_df['ghi'], solar_position['zenith'], weather_df.index)
+        # 5. Decomposition
+        # Using .values on inputs forces pvlib to work in Numpy mode
+        sol_zenith_vals = solar_position['zenith'].values
+        sol_azimuth_vals = solar_position['azimuth'].values
+        sol_app_zenith_vals = solar_position['apparent_zenith'].values
+
+        erbs_model = pvlib.irradiance.erbs(
+            weather_df['ghi'].values, 
+            sol_zenith_vals, 
+            weather_df.index
+        )
         weather_df['dni'] = erbs_model['dni']
         weather_df['dhi'] = erbs_model['dhi']
         weather_df.fillna(0, inplace=True)
 
-        # 4. Determine Mounting Configuration (Fixed vs Tracking)
+        # 6. Mounting Logic
         use_tracking = False
-        
         if mounting_type == 'single_axis':
             use_tracking = True
         elif mounting_type == 'default':
-            # Heuristic: Assume tracking for large, modern farms if not specified
-            # This is a rough guess to improve accuracy where metadata is missing
             is_large = capacity_mw > 50
             is_modern = start_year is not None and isinstance(start_year, (int, float)) and start_year >= 2019
             if is_large and is_modern:
                 use_tracking = True
-            # Also check if tech_type implies tracking
             if 'track' in str(tech_type).lower():
                 use_tracking = True
 
         if use_tracking:
-            # Single-axis tracking calculation
             tracker_data = pvlib.tracking.singleaxis(
-                apparent_zenith=solar_position['apparent_zenith'],
-                solar_azimuth=solar_position['azimuth'],
-                axis_tilt=0,  # Horizontal axis
-                axis_azimuth=180,  # N-S axis
-                max_angle=60,
-                backtrack=True,
-                gcr=0.4  # Ground Coverage Ratio
+                apparent_zenith=sol_app_zenith_vals,
+                apparent_azimuth=sol_azimuth_vals,
+                axis_tilt=0, axis_azimuth=180, max_angle=60, backtrack=True, gcr=0.4
             )
-            surface_tilt = tracker_data['surface_tilt']
-            surface_azimuth = tracker_data['surface_azimuth']
-            # Replace NaNs (night time) with 0 or default to avoid errors in get_total_irradiance
-            surface_tilt = surface_tilt.fillna(0)
-            surface_azimuth = surface_azimuth.fillna(180)
+            # Use np.nan_to_num as these are numpy arrays
+            surface_tilt = np.nan_to_num(tracker_data['surface_tilt'], nan=0)
+            surface_azimuth = np.nan_to_num(tracker_data['surface_azimuth'], nan=180)
         else:
-            # Fixed tilt calculation
-            surface_tilt = abs(lat)-5
+            surface_tilt = abs(lat) - 5
             surface_azimuth = 180 if lat > 0 else 0
 
-        dni_extra = pvlib.irradiance.get_extra_radiation(weather_df.index)
+        # 7. POA Calculation
+        dni_extra = pvlib.irradiance.get_extra_radiation(weather_df.index).values
 
         poa_irradiance = pvlib.irradiance.get_total_irradiance(
             surface_tilt=surface_tilt,
             surface_azimuth=surface_azimuth,
-            solar_zenith=solar_position['apparent_zenith'],
-            solar_azimuth=solar_position['azimuth'],
-            dni=weather_df['dni'],
-            ghi=weather_df['ghi'],
-            dhi=weather_df['dhi'],
+            solar_zenith=sol_app_zenith_vals,
+            solar_azimuth=sol_azimuth_vals,
+            dni=weather_df['dni'].values,
+            ghi=weather_df['ghi'].values,
+            dhi=weather_df['dhi'].values,
             dni_extra=dni_extra,
-            albedo=weather_df['albedo'],
-            model='haydavies'  #HAYDAVIES
+            albedo=weather_df['albedo'].values,
+            model='haydavies'
         )
 
-        # 5. Apply Incidence Angle Modifier (IAM)
-        # Calculate Angle of Incidence (AOI)
+        # 8. Effective Irradiance
         aoi = pvlib.irradiance.aoi(
             surface_tilt, 
             surface_azimuth, 
-            solar_position['apparent_zenith'], 
-            solar_position['azimuth']
+            sol_app_zenith_vals, 
+            sol_azimuth_vals
         )
-        
-        # Calculate IAM using ASHRAE model (b=0.05 for standard glass)
         iam = pvlib.iam.ashrae(aoi, b=0.05)
-        
-        # Effective IAM for diffuse (approximate as IAM at 60 degrees)
         iam_diffuse = pvlib.iam.ashrae(60, b=0.05)
         
-        # Calculate Effective Irradiance (irradiance reaching the cell)
         effective_irradiance = (
             poa_irradiance['poa_direct'] * iam + 
             poa_irradiance['poa_diffuse'] * iam_diffuse
         )
-        
-        # 6. Model cell temperature
-        # Choose model based on capacity (proxy for installation type)
-        # < 1 MW likely rooftop (close mount), > 1 MW likely ground mount (open rack)
+
+        # 9. Cell Temperature
         if capacity_mw < 1.0:
              temp_model_name = 'close_mount_glass_glass'
         else:
              temp_model_name = 'open_rack_glass_glass'
-
+        
         temperature_model_parameters = pvlib.temperature.TEMPERATURE_MODEL_PARAMETERS['sapm'][temp_model_name]
-        weather_df['cell_temperature'] = pvlib.temperature.sapm_cell(
-            poa_irradiance['poa_global'],
-            weather_df['temp_air'],
-            weather_df['wind_speed'],
+        
+        cell_temperature = pvlib.temperature.sapm_cell(
+            poa_irradiance['poa_global'], 
+            weather_df['temp_air'].values,
+            weather_df['wind_speed'].values,
             **temperature_model_parameters,
         )
 
-        # 7. Calculate DC power
+        # 10. Power Calculation
         dc_capacity_watts = dc_capacity_mw * 1_000_000
+        
         power_dc = pvlib.pvsystem.pvwatts_dc(
             effective_irradiance=effective_irradiance,
-            temp_cell=weather_df['cell_temperature'],
+            temp_cell=cell_temperature,
             pdc0=dc_capacity_watts,
             gamma_pdc=-0.004,
             temp_ref=25.0
         )
 
-        # 8. Calculate AC power with inverter clipping
         ac_capacity_watts = ac_capacity_mw * 1_000_000
-        power_ac = pvlib.inverter.pvwatts(
+        
+        power_ac_vals = pvlib.inverter.pvwatts(
             pdc=power_dc,
-            pdc0=ac_capacity_watts, # In pvwatts inverter model, pdc0 is the AC rating
+            pdc0=ac_capacity_watts,
             eta_inv_nom=0.96
         )
 
-        # Apply derate factor for other losses
+        # 11. Final Packaging
+        power_ac = pd.Series(power_ac_vals, index=weather_df.index)
         power_ac = power_ac * performance_ratio
+        
+        # Shift -1 (Hour) to fix timestamp labeling (Interval Ending -> Interval Starting)
+        power_ac = power_ac.shift(-1)
 
         if smoothing_window_hours is not None and smoothing_window_hours > 0:
-  
             power_ac = power_ac.rolling(window=smoothing_window_hours, center=True, win_type='gaussian').mean(std=smoothing_window_hours/3)
         
         return power_ac.fillna(0)
@@ -485,7 +478,6 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
     except Exception as e:
         print(f"Could not process PV farm at ({lat}, {lon}). Error: {e}")
         return None
-
 
 def estimate_csp_power(lat, lon, capacity_mw, status, ssrd, ws, temp, al, dni_ref=900):
     """
@@ -554,7 +546,7 @@ def operating_farms(country, power_type):
         operating_dict = {
             "Sweden":["operating", 'construction'],
             "Norway": ["operating"],
-            "Finland": ["operating", 'shelved - inferred 2 y'],
+            "Finland": ["operating"],
             "Denmark": ['operating', 'shelved', 'pre-construction', 'announced', 'shelved - inferred 2 y'],
             "Netherlands": ["operating", "construction"],
             "Germany": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
@@ -706,8 +698,29 @@ def get_bidding_zone_mapping(zone):
         'SE4': ['Halland County', 'Halland', 'Kronoberg County', 'Kalmar County', 'Kalmar', 'Blekinge County', 'Blekinge', 'Skåne County', 'Skane',
                 'Malmö', 'Helsingborg', 'Lund', 'Karlskrona', 'Växjö', 'Halmstad', 'Falkenberg', 'Varberg',
                 'Skåne län', 'Blekinge län', 'Kronobergs län', 'Hallands län', 'Kalmar län', 'Kristianstad', 'Landskrona', 'Trelleborg', 'Ängelholm', 'Hässleholm', 'Eslöv', 'Ystad', 'Simrishamn', 'Tomelilla', 'Sjöbo', 'Skurup', 'Svedala', 'Vellinge', 'Lomma', 'Burlöv', 'Staffanstorp', 'Kävlinge', 'Höör', 'Hörby', 'Bromölla', 'Osby', 'Östra Göinge', 'Perstorp', 'Klippan', 'Åstorp', 'Bjuv', 'Svalöv', 'Båstad', 'Laholm', 'Hylte', 'Ljungby', 'Markaryd', 'Älmhult', 'Alvesta', 'Lessebo', 'Tingsryd', 'Uppvidinge', 'Nybro', 'Emmaboda', 'Torsås', 'Mörbylånga', 'Borgholm', 'Oskarshamn', 'Mönsterås', 'Högsby', 'Hultsfred', 'Vimmerby', 'Västervik'],
-        'DK1': ['North Denmark Region', 'Central Denmark Region', 'Region of Southern Denmark', 'Kattegat', 'Ringkobing', 'Samsø Municipality', 'Aabenraa', 'Aarhus', 'Assens', 'Herning', 'Hjørring', 'Horsens', 'Ikast-Brande', 'Kolding', 'Lemvig', 'Læsø', 'Mariagerfjord', 'Middelfart', 'Norddjurs', 'Nordfyns', 'Odense', 'Randers', 'Ringkøbing-Skjern', 'Silkeborg', 'Svendborg', 'Sønderborg', 'Varde', 'Vejle', 'Viborg', 'Frederikshavn', 'Brønderslev', 'Skive', 'Holstebro', 'Thisted', 'North Jutland', 'North Denmark', 'Aalborg CSP-Brønderslev CSP with ORC project', 'Dronninglund A solar project', 'Agersted solar farm', 'Arla solar farm'],
-        'DK2': ['Region Zealand', 'Capital Region of Denmark', 'Zealand', 'Bornholm', 'Rødby', 'Sjælland', 'Hovedstaden', 'Lolland', 'Falster', 'Møn', 'Ballerup', 'Faxe', 'Guldborgsund', 'Holbæk', 'Hvidovre', 'Ishøj', 'Tårnby', 'Vordingborg', 'Kalundborg'],
+        'DK1': [
+            # Regions
+            'North Denmark Region', 'Central Denmark Region', 'Region of Southern Denmark', 
+            # Specific Areas/Islands
+            'Kattegat', 'Ringkobing', 'Samsø Municipality', 'Jutland', 'Langeland', 'Sønderland', 'Jammerbugt', 'North Jutland', 'North Denmark', 'Anholt',
+            # Cities/Locations found in CSV
+            'Aabenraa', 'Aarhus', 'Assens', 'Herning', 'Hjørring', 'Horsens', 'Ikast-Brande', 'Kolding', 'Lemvig', 'Læsø', 
+            'Mariagerfjord', 'Middelfart', 'Norddjurs', 'Nordfyns', 'Odense', 'Randers', 'Ringkøbing-Skjern', 'Silkeborg', 
+            'Svendborg', 'Sønderborg', 'Varde', 'Vejle', 'Viborg', 'Frederikshavn', 'Brønderslev', 'Skive', 'Holstebro', 'Thisted',
+            'Karlby', 'Hvide Sande', 'Thyboron', 'Thyborøn', 'Hanstholm', 'Oksby', 'Vejers', 'Esbjerg', 'Søndervig', 
+            'Grenaa', 'Logstor', 'Vestervig', 'Harboøre', 'Klitmøller', 'Venner',
+            # Projects
+            'Aalborg CSP-Brønderslev CSP with ORC project', 'Dronninglund A solar project', 'Agersted solar farm', 'Arla solar farm'
+        ],
+        'DK2': [
+            # Regions
+            'Region Zealand', 'Capital Region of Denmark', 'Zealand', 'Sjælland', 'Hovedstaden',
+            # Specific Areas/Islands
+            'Bornholm', 'Lolland', 'Falster', 'Møn', 'Sprogø', 'Hesselø',
+            # Cities/Locations found in CSV
+            'Rødby', 'Rødbyhavn', 'Ballerup', 'Faxe', 'Guldborgsund', 'Holbæk', 'Hvidovre', 'Ishøj', 'Tårnby', 'Vordingborg', 'Kalundborg',
+            'Amager', 'Avedøre', 'Højerup', 'Gedser', 'Store Heddinge', 'Klintholm Havn', 'Rågeleje', 'Magleskov Huse', 'Hyllekrog', 'Borre'
+        ],
     }
     if zone not in zone_dict:
         raise ValueError(f"Bidding zone '{zone}' not found.")

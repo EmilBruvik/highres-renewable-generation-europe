@@ -2,7 +2,7 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2024 --month 03 --n-jobs-pv 4
+# python -u scripts/weather_energy_monthly.py --year 2023 --month 01 --n-jobs-pv 4
 # for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 4; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
@@ -236,12 +236,23 @@ class PVCalculator:
         )
 
         if area_code in ZONES:
-            zone_cities = functions.get_bidding_zone_mapping(area_code)
-            mask = pd.Series(False, index=df_country.index)
-            for col in LOCATION_COLS_PV:
-                if col in df_country.columns:
-                    mask |= df_country[col].isin(zone_cities)
-            df_country = df_country[mask].copy()
+            if area_code.startswith('DK'):
+                # Robust Longitude split for Denmark
+                lon_vals = pd.to_numeric(df_country['Longitude'], errors='coerce')
+                if area_code == 'DK1':
+                    df_country = df_country[lon_vals < 10.9].copy()
+                else: # DK2
+                    df_country = df_country[lon_vals >= 10.9].copy()
+            else:
+                # Standard city-mapping for NO/SE zones
+                zone_cities = functions.get_bidding_zone_mapping(area_code)
+                mask = pd.Series(False, index=df_country.index)
+                # Use specific columns based on whether this is PV or Wind loop
+                cols_to_check = LOCATION_COLS_PV if "PV" in str(type(self)) else LOCATION_COLS_WIND
+                for col in cols_to_check:
+                    if col in df_country.columns:
+                        mask |= df_country[col].isin(zone_cities)
+                df_country = df_country[mask].copy()
         
         T = xrds.sizes["time"]
         empty_ret = (np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0)
@@ -260,6 +271,10 @@ class PVCalculator:
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         solar_actual = actual_loader.solar_series_mw(actual_file, area_code)
+
+        if solar_actual.sum() <= 1.0:
+            print(f"Skipping {country} (PV): No actual production data found.", flush=True)
+            return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         lat = df_country["Latitude"].to_numpy()
         lon = df_country["Longitude"].to_numpy()
@@ -321,11 +336,16 @@ class PVCalculator:
         mw_2025 = watts_2025 / 1_000_000.0
         mw_asbuilt = watts_asbuilt / 1_000_000.0
 
-        factor = self._factor_from_asbuilt(mw_asbuilt, xrds["time"].values, solar_actual)
+        shifted_index = pd.to_datetime(xrds["time"].values) - pd.Timedelta(hours=1)
+        factor = self._factor_from_asbuilt(mw_asbuilt, shifted_index, solar_actual)
 
+        mw_asbuilt_series = pd.Series(mw_asbuilt * factor, index=shifted_index).astype(np.float64)
+        mw_2025_series = pd.Series(mw_2025 * factor, index=shifted_index).astype(np.float64)
+
+        # Ensure the factor calculation also uses the shifted index
         res = (
-            (mw_asbuilt * factor).astype(np.float64),
-            (mw_2025 * factor).astype(np.float64),
+            mw_asbuilt_series.values,
+            mw_2025_series.values,
             float(factor)
         )
         
@@ -380,24 +400,29 @@ class WindCalculator:
              return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         if area_code in ZONES:
-            zone_cities = functions.get_bidding_zone_mapping(area_code)
-            mask = pd.Series(False, index=df_country.index)
-            for col in LOCATION_COLS_WIND:
-                if col in df_country.columns:
-                    mask |= df_country[col].isin(zone_cities)
-            df_country = df_country[mask].copy()
-
-        op_status = set(functions.operating_farms(country, "wind"))
-        df_country = df_country[df_country["Status"].isin(op_status)].copy()
-        
-        df_country["Latitude"] = pd.to_numeric(df_country["Latitude"], errors="coerce")
-        df_country["Longitude"] = pd.to_numeric(df_country["Longitude"], errors="coerce")
-        df_country = df_country.dropna(subset=["Latitude", "Longitude"])
+            if area_code.startswith('DK'):
+                lon_vals = pd.to_numeric(df_country['Longitude'], errors='coerce')
+                if area_code == 'DK1':
+                    df_country = df_country[lon_vals < 10.9].copy()
+                else: # DK2
+                    df_country = df_country[lon_vals >= 10.9].copy()
+            else:
+                zone_cities = functions.get_bidding_zone_mapping(area_code)
+                mask = pd.Series(False, index=df_country.index)
+                cols_to_check = LOCATION_COLS_PV if "PV" in str(type(self)) else LOCATION_COLS_WIND
+                for col in cols_to_check:
+                    if col in df_country.columns:
+                        mask |= df_country[col].isin(zone_cities)
+                df_country = df_country[mask].copy()
 
         if len(df_country) == 0:
              return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         wind_actual = actual_loader.wind_series_mw(actual_file, area_code)
+
+        if wind_actual.sum() <= 1.0:
+            print(f"Skipping {country} (Wind): No actual production data found.", flush=True)
+            return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         lat = df_country["Latitude"].to_numpy()
         lon = df_country["Longitude"].to_numpy()
@@ -434,8 +459,9 @@ class WindCalculator:
                 xrds=xrds,
                 y_idx=int(y_idx[i]),
                 x_idx=int(x_idx[i]),
-                wts_smoothing=True,
-                wake_loss_factor=0.95,
+                wts_smoothing=False,
+                power_smoothing=False,
+                wake_loss_factor=0.99,
                 spatial_interpolation=True,
                 verbose=False,
                 single_turb_curve=False,
@@ -451,9 +477,13 @@ class WindCalculator:
             if return_farm_data:
                 farm_results.append((i, ts_mw))
 
+        # FIX: Align Wind Timestamps similarly to PV (End of Hour -> Start of Hour labeling)
+        # Assuming ENTSO-E actuals are interval-starting.
+        shifted_index_wind = pd.to_datetime(xrds["valid_time"].values) - pd.Timedelta(hours=1)
+
         factor = PVCalculator._factor_from_asbuilt(
             mw_asbuilt,
-            xrds["valid_time"].values,
+            shifted_index_wind,
             wind_actual,
         )
 
@@ -556,7 +586,7 @@ class MonthlyRunner:
         ax.legend(loc="upper right")
         ax.grid(True)
         pv_out = pv_dir / f"pv_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
-        fig.savefig(pv_out, bbox_inches="tight", dpi=300)
+        fig.savefig(pv_out, bbox_inches="tight")
         plt.close(fig)
 
         # Wind plot
@@ -582,7 +612,7 @@ class MonthlyRunner:
         ax.legend(loc="upper right")
         ax.grid(True)
         wind_out = wind_dir / f"wind_power_comparison_{ms.month_number}_{ms.year}_{label}.svg"
-        fig.savefig(wind_out, bbox_inches="tight", dpi=300)
+        fig.savefig(wind_out, bbox_inches="tight")
         plt.close(fig)
 
     def run_month(self, ms: MonthSpec) -> Path:
@@ -590,28 +620,36 @@ class MonthlyRunner:
 
         actual_file = self.actual_loader.load_month_file(ms.year, ms.month_number)
 
-        pv_ds = self.pv.open_weather(ms) #open PV dataset
+        # 1. Open Weather Data
+        # PV Dataset
+        pv_ds = self.pv.open_weather(ms)
         pv_indexer = GridIndexer(pv_ds["latitude"].values, pv_ds["longitude"].values)
         
-        wind_ds = self.wind.open_weather(ms) #open Wind dataset
+        # Wind Dataset
+        wind_ds = self.wind.open_weather(ms)
         wind_indexer = GridIndexer(wind_ds["latitude"].values, wind_ds["longitude"].values)
 
-        #2. Initialize Grids (Float32 to save memory)
-        #Dimensions: [Time, Y, X]
+        # 2. Initialize Grids (Float32 to save memory)
+        # Dimensions: [Time, Y, X]
         print("Initializing global grids...", flush=True)
         T_pv = pv_ds.sizes["time"]
         Y_dim = pv_ds.sizes["y"]
         X_dim = pv_ds.sizes["x"]
         
-        grid_pv = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
-        grid_wind_on = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
-        grid_wind_off = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        # We will use PV coordinates for the final output grid
+        global_pv_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        global_wind_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
 
+        # 3. Aggregation Lists
         pv_asbuilt_all = []
         pv_2025_all = []
         wind_asbuilt_all = []
         wind_2025_all = []
         areas = []
+        
+        # --- NEW: List to collect correction factors ---
+        factor_records = [] 
+        # -----------------------------------------------
 
         # 4. Iterate Countries
         for country, code in zip(countries_tracker, countries_codes):
@@ -633,9 +671,7 @@ class MonthlyRunner:
                     
                     # Convert W -> MW and apply factor
                     ts_mw = (ts_watts / 1_000_000.0) * pv_factor
-                    
-                    # Combine all Solar (PV + CSP) into one variable
-                    grid_pv[:, int(y), int(x)] += ts_mw
+                    global_pv_grid[:, int(y), int(x)] += ts_mw
 
             # --- Wind Calculation ---
             wind_ret = self.wind.country_timeseries(
@@ -653,19 +689,29 @@ class MonthlyRunner:
                     y = w_df_country.iloc[i]["y_idx"]
                     x = w_df_country.iloc[i]["x_idx"]
                     
-                    inst_type = str(w_df_country.iloc[i]["Installation Type"]).lower()
-                    
                     # Apply factor
                     ts_mw = ts_mw_unc * w_factor
-                    
-                    if "offshore" in inst_type:
-                        grid_wind_off[:, int(y), int(x)] += ts_mw
-                    else:
-                        # Default to Onshore
-                        grid_wind_on[:, int(y), int(x)] += ts_mw
+                    global_wind_grid[:, int(y), int(x)] += ts_mw
 
             areas.append(code)
 
+            # --- NEW: Append factors to list ---
+            factor_records.append({
+                "Area": code,
+                "PV_Factor": pv_factor,
+                "Wind_Factor": w_factor
+            })
+            
+            # Save incrementally (optional, but good practice) or save after loop.
+            # Here we follow the requested style of saving inside the loop to ensure progress is captured.
+            alpha_out = self.out_dir_aggregated / f"correction_factors/{ms.month_number}_{ms.year}_pv_wind_country_factors.csv"
+            alpha_out.parent.mkdir(parents=True, exist_ok=True)
+            alpha_dataframe = pd.DataFrame(factor_records, columns=["Area", "PV_Factor", "Wind_Factor"])
+            alpha_dataframe.to_csv(alpha_out, index=False)
+            print(f"Wrote correction factors file: {alpha_out}", flush=True)
+            # -----------------------------------
+
+            # Plots
             self.plotting_timeseries(
                 ms=ms,
                 area_code=code,
@@ -679,6 +725,7 @@ class MonthlyRunner:
                 actual_file=actual_file,
             )
 
+        # 5. Save Aggregated Country Output
         pv_asbuilt = np.stack(pv_asbuilt_all, axis=1)
         pv_2025 = np.stack(pv_2025_all, axis=1)
         wind_asbuilt = np.stack(wind_asbuilt_all, axis=1)
@@ -709,12 +756,13 @@ class MonthlyRunner:
         self._write_atomic(out_agg, out_file_agg)
         print(f"Wrote aggregated file: {out_file_agg}", flush=True)
 
+        # 6. Save Gridded Per-Farm Output
         print("Saving gridded per-farm output...", flush=True)
-        grid_out = xr.Dataset( #using dimensions and coords from pv_ds as reference
+        # Using dimensions and coords from pv_ds as reference
+        grid_out = xr.Dataset(
             {
-                'wind_onshore_mw': (('time', 'y', 'x'), grid_wind_on),
-                'wind_offshore_mw': (('time', 'y', 'x'), grid_wind_off),
-                'pv_mw': (('time', 'y', 'x'), grid_pv),
+                'wind_power_mw': (('time', 'y', 'x'), global_wind_power_grid := global_wind_grid),
+                'pv_power_mw': (('time', 'y', 'x'), global_pv_power_grid := global_pv_grid),
             },
             coords={
                 'time': (('time',), pv_ds['time'].values),
@@ -725,7 +773,8 @@ class MonthlyRunner:
             }
         )
         
-        del grid_wind_on, grid_wind_off, grid_pv #free memory
+        # Free memory
+        del global_wind_grid, global_pv_grid
 
         out_file_grid = self.out_dir_farms / f"{ms.month_number}_{ms.year}_pv_wind_grid.nc"
         if out_file_grid.exists():
@@ -733,6 +782,7 @@ class MonthlyRunner:
         self._write_atomic(grid_out, out_file_grid)
         print(f"Wrote gridded file: {out_file_grid}", flush=True)
 
+        # Cleanup
         pv_ds.close()
         wind_ds.close()
         del pv_ds, wind_ds, pv_indexer, wind_indexer, out_agg, grid_out
@@ -749,7 +799,9 @@ def main():
     p.add_argument("--month", required=True, help="Month number: 01..12")
     p.add_argument("--n-jobs-pv", type=int, default=8)
     
+    # Aggregated output defaults to original path
     p.add_argument("--out-dir", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/country-aggregated-production")
+    # Per-farm output defaults to new request path
     p.add_argument("--out-dir-farm", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/per-farm-production")
     
     args = p.parse_args()
