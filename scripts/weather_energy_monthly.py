@@ -2,8 +2,8 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2023 --month 01 --n-jobs-pv 4
-# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 4; done
+# python -u scripts/weather_energy_monthly.py --year 2023 --month 02 --n-jobs-pv 2
+# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
