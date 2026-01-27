@@ -353,20 +353,22 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
         location = pvlib.location.Location(latitude=lat, longitude=lon, tz='UTC')
         solar_time_index = weather_df.index - pd.Timedelta(minutes=30)
         solar_position = location.get_solarposition(times=solar_time_index)
-        
-        if twilight_zenith_limit:
-            solar_position['zenith'] = solar_position['zenith'].clip(upper=twilight_zenith_limit)
-            solar_position['apparent_zenith'] = solar_position['apparent_zenith'].clip(upper=twilight_zenith_limit)
             
         # 5. Decomposition
         # Using .values on inputs forces pvlib to work in Numpy mode
         sol_zenith_vals = solar_position['zenith'].values
         sol_azimuth_vals = solar_position['azimuth'].values
         sol_app_zenith_vals = solar_position['apparent_zenith'].values
+        
+        zenith_for_decomposition = sol_zenith_vals.copy()
+        if twilight_zenith_limit:
+            np.clip(zenith_for_decomposition, 0, twilight_zenith_limit, out=zenith_for_decomposition)
+        else:
+            np.clip(zenith_for_decomposition, 0, 87, out=zenith_for_decomposition)
 
         erbs_model = pvlib.irradiance.erbs(
             weather_df['ghi'].values, 
-            sol_zenith_vals, 
+            zenith_for_decomposition, 
             weather_df.index
         )
         weather_df['dni'] = erbs_model['dni']
@@ -462,6 +464,9 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
             pdc0=ac_capacity_watts,
             eta_inv_nom=0.96
         )
+        
+        night_mask = sol_zenith_vals > 85
+        power_ac_vals[night_mask] = 0.0
 
         # 11. Final Packaging
         power_ac = pd.Series(power_ac_vals, index=weather_df.index)
