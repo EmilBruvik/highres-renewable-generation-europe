@@ -44,31 +44,34 @@ MONTHS = [
     ("09", "sep"), ("10", "oct"), ("11", "nov"), ("12", "dec"),
 ]
 
-countries_tracker = [
-    "Austria", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
-    "Switzerland", "Cyprus", "Czech Republic", "Germany",
-    "Denmark", "Denmark", "Estonia", "Spain",
-    "Finland", "France", "United Kingdom", "Georgia", "Greece", "Croatia", "Hungary",
-    "Ireland", "Italy",
-    "Lithuania", "Luxembourg", "Latvia", "Moldova",
-    "Montenegro", "North Macedonia", "Netherlands",
-    "Norway", "Norway", "Norway", "Norway", "Norway", "Poland", "Portugal",
-    "Romania", "Serbia", "Sweden", "Sweden", "Sweden", "Sweden",
-    "Slovenia", "Slovakia", "Kosovo",
-]
+# countries_tracker = [
+#     "Austria", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
+#     "Switzerland", "Cyprus", "Czech Republic", "Germany",
+#     "Denmark", "Denmark", "Estonia", "Spain",
+#     "Finland", "France", "United Kingdom", "Georgia", "Greece", "Croatia", "Hungary",
+#     "Ireland", "Italy",
+#     "Lithuania", "Luxembourg", "Latvia", "Moldova",
+#     "Montenegro", "North Macedonia", "Netherlands",
+#     "Norway", "Norway", "Norway", "Norway", "Norway", "Poland", "Portugal",
+#     "Romania", "Serbia", "Sweden", "Sweden", "Sweden", "Sweden",
+#     "Slovenia", "Slovakia", "Kosovo",
+# ]
 
-countries_codes = [
-    "Austria (AT)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
-    "Switzerland (CH)", "Cyprus (CY)", "Czech Republic (CZ)", "Germany (DE)",
-    "DK1", "DK2", "Estonia (EE)", "Spain (ES)",
-    "Finland (FI)", "France (FR)", "United Kingdom (UK)", "Georgia (GE)", "Greece (GR)", "Croatia (HR)", "Hungary (HU)",
-    "Ireland (IE)", "Italy (IT)",
-    "Lithuania (LT)", "Luxembourg (LU)", "Latvia (LV)", "Moldova (MD)",
-    "Montenegro (ME)", "North Macedonia (MK)", "Netherlands (NL)",
-    "NO1", "NO2", "NO3", "NO4", "NO5", "Poland (PL)", "Portugal (PT)",
-    "Romania (RO)", "Serbia (RS)", "SE1", "SE2", "SE3", "SE4",
-    "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)",
-]
+countries_tracker = ["United Kingdom"]
+countries_codes = ["United Kingdom (UK)"]
+
+# countries_codes = [
+#     "Austria (AT)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
+#     "Switzerland (CH)", "Cyprus (CY)", "Czech Republic (CZ)", "Germany (DE)",
+#     "DK1", "DK2", "Estonia (EE)", "Spain (ES)",
+#     "Finland (FI)", "France (FR)", "United Kingdom (UK)", "Georgia (GE)", "Greece (GR)", "Croatia (HR)", "Hungary (HU)",
+#     "Ireland (IE)", "Italy (IT)",
+#     "Lithuania (LT)", "Luxembourg (LU)", "Latvia (LV)", "Moldova (MD)",
+#     "Montenegro (ME)", "North Macedonia (MK)", "Netherlands (NL)",
+#     "NO1", "NO2", "NO3", "NO4", "NO5", "Poland (PL)", "Portugal (PT)",
+#     "Romania (RO)", "Serbia (RS)", "SE1", "SE2", "SE3", "SE4",
+#     "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)",
+# ]
 
 ZONES = ["NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "SE1", "SE2", "SE3", "SE4"]
 LOCATION_COLS_PV = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region", "Project Name"]
@@ -118,8 +121,9 @@ class GridIndexer:
 
 
 class ActualGenerationLoader:
-    def __init__(self, timezone_mapping: dict):
+    def __init__(self, timezone_mapping: dict, area_code_map: dict):
         self.tzmap = timezone_mapping
+        self.acmap = area_code_map
 
     def load_month_file(self, year: str, month_number: str) -> pd.DataFrame:
         return pd.read_csv(
@@ -143,26 +147,43 @@ class ActualGenerationLoader:
 
         raise ValueError("Actual generation file format not recognized (missing DateTime(UTC) and MTU).")
 
-    def solar_series_mw(self, actual_file: pd.DataFrame, area_code: str) -> pd.Series:
-        tz = self.tzmap.get(area_code, "Europe/Copenhagen")
-        df_area = actual_file[actual_file["AreaDisplayName"] == area_code].copy()
-        df_area = self._index_to_local_tz(df_area, tz)
+    def _get_data_for_area(self, actual_file: pd.DataFrame, area_code_in: str, col_name: str) -> pd.Series:
+        tz = self.tzmap.get(area_code_in, "Europe/Copenhagen")
+        
+        target_eic_codes = self.acmap.get(area_code_in, [])
+        
+        if not target_eic_codes:
+            if area_code_in.startswith("10Y"):
+                target_eic_codes = [area_code_in]
+            else:
+                mask = actual_file["AreaDisplayName"] == area_code_in
+        else:
+            mask = actual_file["AreaCode"].isin(target_eic_codes)
 
-        solar = df_area[df_area["ProductionType"] == "Solar"]
-        s = pd.to_numeric(solar["ActualGenerationOutput[MW]"], errors="coerce").fillna(0)
-        return s.resample("h").mean()
+        df_subset = actual_file[mask].copy()
+        
+        if df_subset.empty:
+            return pd.Series(dtype=float)
+
+        df_subset = self._index_to_local_tz(df_subset, tz)
+        
+        if col_name == "Solar":
+            prod_mask = df_subset["ProductionType"] == "Solar"  
+        elif col_name == "Wind":
+            prod_mask = df_subset["ProductionType"].isin(["Wind Onshore", "Wind Offshore"])
+        else:
+            return pd.Series(dtype=float)
+
+        final_subset = df_subset[prod_mask].copy()
+        
+        s = pd.to_numeric(final_subset["ActualGenerationOutput[MW]"], errors="coerce").fillna(0)
+        return s.groupby(level=0).sum().resample("h").mean()
+
+    def solar_series_mw(self, actual_file: pd.DataFrame, area_code: str) -> pd.Series:
+        return self._get_data_for_area(actual_file, area_code, "Solar")
 
     def wind_series_mw(self, actual_file: pd.DataFrame, area_code: str) -> pd.Series:
-        tz = self.tzmap.get(area_code, "Europe/Copenhagen")
-        df_area = actual_file[actual_file["AreaDisplayName"] == area_code].copy()
-        df_area = self._index_to_local_tz(df_area, tz)
-
-        on = df_area[df_area["ProductionType"] == "Wind Onshore"]
-        off = df_area[df_area["ProductionType"] == "Wind Offshore"]
-        w = pd.concat([on, off])
-        s = pd.to_numeric(w["ActualGenerationOutput[MW]"], errors="coerce").fillna(0)
-        return s.groupby(s.index).sum().resample("h").mean()
-
+        return self._get_data_for_area(actual_file, area_code, "Wind")
 
 class PVCalculator:
     def __init__(self, n_jobs: int = 8):
@@ -226,6 +247,8 @@ class PVCalculator:
         country: str,
         area_code: str,
         return_farm_data: bool = True,
+        fallback_factor: float | None = None,
+        force_factor: bool = False,
     ):
         df_country = pd.concat(
             [
@@ -271,8 +294,9 @@ class PVCalculator:
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         solar_actual = actual_loader.solar_series_mw(actual_file, area_code)
+        use_fallback = force_factor or solar_actual.sum() <= 1.0
 
-        if solar_actual.sum() <= 1.0:
+        if use_fallback and fallback_factor is None:
             print(f"Skipping {country} (PV): No actual production data found.", flush=True)
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
@@ -335,14 +359,17 @@ class PVCalculator:
 
         mw_2025 = watts_2025 / 1_000_000.0
         mw_asbuilt = watts_asbuilt / 1_000_000.0
+        
+        if use_fallback:
+            factor = float(fallback_factor)
+        else:
+            factor = self._factor_from_asbuilt(mw_asbuilt, xrds["time"].values, solar_actual)
 
         shifted_index = pd.to_datetime(xrds["time"].values) - pd.Timedelta(hours=1)
-        factor = self._factor_from_asbuilt(mw_asbuilt, shifted_index, solar_actual)
 
         mw_asbuilt_series = pd.Series(mw_asbuilt * factor, index=shifted_index).astype(np.float64)
         mw_2025_series = pd.Series(mw_2025 * factor, index=shifted_index).astype(np.float64)
 
-        # Ensure the factor calculation also uses the shifted index
         res = (
             mw_asbuilt_series.values,
             mw_2025_series.values,
@@ -391,6 +418,8 @@ class WindCalculator:
         country: str,
         area_code: str,
         return_farm_data: bool = True,
+        fallback_factor: float | None = None,
+        force_factor: bool = False,
     ):
         T = xrds.sizes["valid_time"]
         empty_ret = (np.zeros(T, dtype=np.float64), np.zeros(T, dtype=np.float64), 0.0)
@@ -419,8 +448,9 @@ class WindCalculator:
              return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         wind_actual = actual_loader.wind_series_mw(actual_file, area_code)
+        use_fallback = force_factor or wind_actual.sum() <= 1.0
 
-        if wind_actual.sum() <= 1.0:
+        if use_fallback and fallback_factor is None:
             print(f"Skipping {country} (Wind): No actual production data found.", flush=True)
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
@@ -461,7 +491,7 @@ class WindCalculator:
                 x_idx=int(x_idx[i]),
                 wts_smoothing=False,
                 power_smoothing=False,
-                wake_loss_factor=0.99,
+                wake_loss_factor=1.0,
                 spatial_interpolation=True,
                 verbose=False,
                 single_turb_curve=False,
@@ -477,15 +507,17 @@ class WindCalculator:
             if return_farm_data:
                 farm_results.append((i, ts_mw))
 
-        # FIX: Align Wind Timestamps similarly to PV (End of Hour -> Start of Hour labeling)
-        # Assuming ENTSO-E actuals are interval-starting.
+        # Align wind timestamps to interval-start
         shifted_index_wind = pd.to_datetime(xrds["valid_time"].values) - pd.Timedelta(hours=1)
-
-        factor = PVCalculator._factor_from_asbuilt(
-            mw_asbuilt,
-            shifted_index_wind,
-            wind_actual,
-        )
+        
+        if use_fallback:
+            factor = float(fallback_factor)
+        else:
+            factor = PVCalculator._factor_from_asbuilt(
+                mw_asbuilt,
+                shifted_index_wind,
+                wind_actual,
+            )
 
         res = (
             (mw_asbuilt * factor).astype(np.float64),
@@ -499,15 +531,17 @@ class WindCalculator:
 
 
 class MonthlyRunner:
-    def __init__(self, out_dir_aggregated: Path, out_dir_farms: Path, n_jobs_pv: int = 8):
+    def __init__(self, out_dir_aggregated: Path, out_dir_farms: Path, n_jobs_pv: int = 8, history_root: Path | None = None):
         self.out_dir_aggregated = out_dir_aggregated
         self.out_dir_farms = out_dir_farms
+        self.history_root = history_root if history_root is not None else out_dir_aggregated.parent
         
         self.out_dir_aggregated.mkdir(parents=True, exist_ok=True)
         self.out_dir_farms.mkdir(parents=True, exist_ok=True)
 
         self.tzmap = functions.get_timezone_mapping()
-        self.actual_loader = ActualGenerationLoader(self.tzmap)
+        self.acmap = functions.get_area_code_mapping()
+        self.actual_loader = ActualGenerationLoader(self.tzmap, self.acmap)
 
         self.pv = PVCalculator(n_jobs=n_jobs_pv)
         self.wind = WindCalculator()
@@ -516,7 +550,6 @@ class MonthlyRunner:
     def _write_atomic(ds: xr.Dataset, out_path: Path):
         """Write NetCDF with atomic write and COMPRESSION."""
         
-        # Define compression settings for every data variable
         comp = dict(zlib=True, complevel=4)
         encoding = {var: comp for var in ds.data_vars}
 
@@ -547,6 +580,59 @@ class MonthlyRunner:
             model.index = model.index.tz_convert(actual.index.tz)
         common = actual.index.intersection(model.index)
         return model.loc[common], actual.loc[common]
+    
+    def _weighted_factor_from_history(self, area_code: str, factor_col: str, ms: MonthSpec) -> float | None:
+        target_year = int(ms.year)
+        target_month = int(ms.month_number)
+
+        total_weight = 0.0
+        total_value = 0.0
+
+        cf_root = self.history_root
+        if not cf_root.exists():
+            return None
+
+        files_found = list(sorted(cf_root.glob("**/correction_factors/*_pv_wind_country_factors.csv")))
+        
+        for f in files_found:
+            parts = f.stem.split("_")
+            if len(parts) < 4:
+                continue
+            try:
+                month = int(parts[0])
+                year = int(parts[1])
+            except ValueError:
+                continue
+
+            if (year > target_year) or (year == target_year and month >= target_month):
+                continue
+
+            months_diff = (target_year - year) * 12 + (target_month - month)
+            if months_diff <= 0:
+                continue
+
+            df = pd.read_csv(f)
+            row = df[df["Area"] == area_code]
+            if row.empty:
+                continue
+
+            col_to_use = factor_col
+            if col_to_use not in row.columns and factor_col == "Wind_Factor" and "Wind_Factor_Multi" in row.columns:
+                col_to_use = "Wind_Factor_Multi"
+            if col_to_use not in row.columns:
+                continue
+
+            val = pd.to_numeric(row[col_to_use], errors="coerce").iloc[0]
+            if not np.isfinite(val) or float(val) <= 0.0:
+                continue
+
+            weight = 1.0 / months_diff
+            total_weight += weight
+            total_value += weight * float(val)
+
+        if total_weight == 0.0:
+            return None
+        return total_value / total_weight
 
     def plotting_timeseries(
         self,
@@ -563,7 +649,7 @@ class MonthlyRunner:
     ) -> None:
         label = area_code if area_code in ZONES else country
 
-        # PV plot
+        #PV plot
         solar_actual = self.actual_loader.solar_series_mw(actual_file, area_code)
         pv_model_series, solar_actual_series = self._align_series(pv_model, pv_time, solar_actual)
 
@@ -589,7 +675,7 @@ class MonthlyRunner:
         fig.savefig(pv_out, bbox_inches="tight")
         plt.close(fig)
 
-        # Wind plot
+        #Wind plot
         wind_actual = self.actual_loader.wind_series_mw(actual_file, area_code)
         wind_model_series, wind_actual_series = self._align_series(wind_model, wind_time, wind_actual)
 
@@ -619,18 +705,11 @@ class MonthlyRunner:
         print(f"\n=== Running {ms.year}-{ms.month_number} ({ms.month_name}) ===", flush=True)
 
         actual_file = self.actual_loader.load_month_file(ms.year, ms.month_number)
-
-        # 1. Open Weather Data
-        # PV Dataset
         pv_ds = self.pv.open_weather(ms)
         pv_indexer = GridIndexer(pv_ds["latitude"].values, pv_ds["longitude"].values)
         
-        # Wind Dataset
         wind_ds = self.wind.open_weather(ms)
         wind_indexer = GridIndexer(wind_ds["latitude"].values, wind_ds["longitude"].values)
-
-        # 2. Initialize Grids (Float32 to save memory)
-        # Dimensions: [Time, Y, X]
         print("Initializing global grids...", flush=True)
         T_pv = pv_ds.sizes["time"]
         Y_dim = pv_ds.sizes["y"]
@@ -640,50 +719,72 @@ class MonthlyRunner:
         global_pv_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
         global_wind_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
 
-        # 3. Aggregation Lists
         pv_asbuilt_all = []
         pv_2025_all = []
         wind_asbuilt_all = []
         wind_2025_all = []
         areas = []
         
-        # --- NEW: List to collect correction factors ---
         factor_records = [] 
-        # -----------------------------------------------
 
-        # 4. Iterate Countries
         for country, code in zip(countries_tracker, countries_codes):
+            uk_after_may_2021 = (
+                country == "United Kingdom"
+                and (
+                    int(ms.year) > 2021
+                    or (int(ms.year) == 2021 and int(ms.month_number) > 5)
+                )
+            )
+
+            pv_fallback = None
+            wind_fallback = None
+            if uk_after_may_2021:
+                pv_fallback = self._weighted_factor_from_history(code, "PV_Factor", ms)
+                wind_fallback = self._weighted_factor_from_history(code, "Wind_Factor", ms)
+
             # --- PV Calculation ---
             pv_ret = self.pv.country_timeseries(
-                ms, pv_ds, pv_indexer, self.actual_loader, actual_file, country, code, return_farm_data=True
+                ms,
+                pv_ds,
+                pv_indexer,
+                self.actual_loader,
+                actual_file,
+                country,
+                code,
+                return_farm_data=True,
+                fallback_factor=pv_fallback,
+                force_factor=uk_after_may_2021 and pv_fallback is not None,
             )
             pv_as, pv_25, pv_factor, pv_df_country, pv_farms = pv_ret
             
-            # Aggregate stats
             pv_asbuilt_all.append(pv_as)
             pv_2025_all.append(pv_25)
 
-            # Accumulate to global grid (Apply factor, convert Watts to MW)
             if pv_farms:
                 for i, ts_watts in pv_farms:
                     y = pv_df_country.iloc[i]["y_idx"]
                     x = pv_df_country.iloc[i]["x_idx"]
                     
-                    # Convert W -> MW and apply factor
                     ts_mw = (ts_watts / 1_000_000.0) * pv_factor
                     global_pv_grid[:, int(y), int(x)] += ts_mw
 
-            # --- Wind Calculation ---
             wind_ret = self.wind.country_timeseries(
-                ms, wind_ds, wind_indexer, self.actual_loader, actual_file, country, code, return_farm_data=True
+                ms,
+                wind_ds,
+                wind_indexer,
+                self.actual_loader,
+                actual_file,
+                country,
+                code,
+                return_farm_data=True,
+                fallback_factor=wind_fallback,
+                force_factor=uk_after_may_2021 and wind_fallback is not None,
             )
             w_as, w_25, w_factor, w_df_country, w_farms = wind_ret
 
-            # Aggregate stats
             wind_asbuilt_all.append(w_as)
             wind_2025_all.append(w_25)
 
-            # Accumulate to global grid (Apply factor)
             if w_farms:
                 for i, ts_mw_unc in w_farms:
                     y = w_df_country.iloc[i]["y_idx"]
@@ -695,21 +796,18 @@ class MonthlyRunner:
 
             areas.append(code)
 
-            # --- NEW: Append factors to list ---
+            # --- Append factors to list ---
             factor_records.append({
                 "Area": code,
                 "PV_Factor": pv_factor,
                 "Wind_Factor": w_factor
             })
             
-            # Save incrementally (optional, but good practice) or save after loop.
-            # Here we follow the requested style of saving inside the loop to ensure progress is captured.
             alpha_out = self.out_dir_aggregated / f"correction_factors/{ms.month_number}_{ms.year}_pv_wind_country_factors.csv"
             alpha_out.parent.mkdir(parents=True, exist_ok=True)
             alpha_dataframe = pd.DataFrame(factor_records, columns=["Area", "PV_Factor", "Wind_Factor"])
             alpha_dataframe.to_csv(alpha_out, index=False)
             print(f"Wrote correction factors file: {alpha_out}", flush=True)
-            # -----------------------------------
 
             # Plots
             self.plotting_timeseries(
@@ -761,15 +859,15 @@ class MonthlyRunner:
         # Using dimensions and coords from pv_ds as reference
         grid_out = xr.Dataset(
             {
-                'wind_power_mw': (('time', 'y', 'x'), global_wind_power_grid := global_wind_grid),
-                'pv_power_mw': (('time', 'y', 'x'), global_pv_power_grid := global_pv_grid),
+                'wind_power_mw': (("time", "y", "x"), global_wind_power_grid := global_wind_grid),
+                'pv_power_mw': (("time", "y", "x"), global_pv_power_grid := global_pv_grid),
             },
             coords={
-                'time': (('time',), pv_ds['time'].values),
-                'y': (('y',), pv_ds['y'].values),
-                'x': (('x',), pv_ds['x'].values),
-                'latitude': (('y', 'x'), pv_ds['latitude'].values),
-                'longitude': (('y', 'x'), pv_ds['longitude'].values)
+                'time': (("time",), pv_ds['time'].values),
+                'y': (("y",), pv_ds['y'].values),
+                'x': (("x",), pv_ds['x'].values),
+                'latitude': (("y", 'x'), pv_ds['latitude'].values),
+                'longitude': (("y", 'x'), pv_ds['longitude'].values)
             }
         )
         
@@ -800,7 +898,8 @@ def main():
     p.add_argument("--n-jobs-pv", type=int, default=8)
     
     # Aggregated output defaults to original path
-    p.add_argument("--out-dir", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/country-aggregated-production")
+    default_data_path = "/Data/gfi/vindenergi/nab015/highres-renewable-dataset/country-aggregated-production"
+    p.add_argument("--out-dir", default=default_data_path)
     # Per-farm output defaults to new request path
     p.add_argument("--out-dir-farm", default="/Data/gfi/vindenergi/nab015/highres-renewable-dataset/per-farm-production")
     
@@ -814,7 +913,8 @@ def main():
     runner = MonthlyRunner(
         out_dir_aggregated=Path(args.out_dir) / args.year,
         out_dir_farms=Path(args.out_dir_farm) / args.year,
-        n_jobs_pv=args.n_jobs_pv
+        n_jobs_pv=args.n_jobs_pv,
+        history_root=Path(default_data_path)
     )
     runner.run_month(MonthSpec(year=args.year, month_number=month_number, month_name=month_name))
 
