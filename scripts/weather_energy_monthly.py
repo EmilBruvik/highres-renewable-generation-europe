@@ -3,7 +3,7 @@
 
 #-----------Run commands----------------#
 # python -u scripts/weather_energy_monthly.py --year 2023 --month 02 --n-jobs-pv 2
-# for m in $(seq -w 1 12); do   python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# for m in $(seq -w 5 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
@@ -29,7 +29,7 @@ import matplotlib.dates as mdates
 import xarray as xr
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
-import sys
+import sys  
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -44,34 +44,34 @@ MONTHS = [
     ("09", "sep"), ("10", "oct"), ("11", "nov"), ("12", "dec"),
 ]
 
-# countries_tracker = [
-#     "Austria", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
-#     "Switzerland", "Cyprus", "Czech Republic", "Germany",
-#     "Denmark", "Denmark", "Estonia", "Spain",
-#     "Finland", "France", "United Kingdom", "Georgia", "Greece", "Croatia", "Hungary",
-#     "Ireland", "Italy",
-#     "Lithuania", "Luxembourg", "Latvia", "Moldova",
-#     "Montenegro", "North Macedonia", "Netherlands",
-#     "Norway", "Norway", "Norway", "Norway", "Norway", "Poland", "Portugal",
-#     "Romania", "Serbia", "Sweden", "Sweden", "Sweden", "Sweden",
-#     "Slovenia", "Slovakia", "Kosovo",
-# ]
+countries_tracker = [
+    "Austria", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
+    "Switzerland", "Cyprus", "Czech Republic", "Germany",
+    "Denmark", "Denmark", "Estonia", "Spain",
+    "Finland", "France", "United Kingdom", "Georgia", "Greece", "Croatia", "Hungary",
+    "Ireland", "Italy",
+    "Lithuania", "Luxembourg", "Latvia", "Moldova",
+    "Montenegro", "North Macedonia", "Netherlands",
+    "Norway", "Norway", "Norway", "Norway", "Norway", "Poland", "Portugal",
+    "Romania", "Serbia", "Sweden", "Sweden", "Sweden", "Sweden",
+    "Slovenia", "Slovakia", "Kosovo",
+]
 
-countries_tracker = ["United Kingdom"]
-countries_codes = ["United Kingdom (UK)"]
+# countries_tracker = ["United Kingdom"]
+# countries_codes = ["United Kingdom (UK)"]
 
-# countries_codes = [
-#     "Austria (AT)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
-#     "Switzerland (CH)", "Cyprus (CY)", "Czech Republic (CZ)", "Germany (DE)",
-#     "DK1", "DK2", "Estonia (EE)", "Spain (ES)",
-#     "Finland (FI)", "France (FR)", "United Kingdom (UK)", "Georgia (GE)", "Greece (GR)", "Croatia (HR)", "Hungary (HU)",
-#     "Ireland (IE)", "Italy (IT)",
-#     "Lithuania (LT)", "Luxembourg (LU)", "Latvia (LV)", "Moldova (MD)",
-#     "Montenegro (ME)", "North Macedonia (MK)", "Netherlands (NL)",
-#     "NO1", "NO2", "NO3", "NO4", "NO5", "Poland (PL)", "Portugal (PT)",
-#     "Romania (RO)", "Serbia (RS)", "SE1", "SE2", "SE3", "SE4",
-#     "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)",
-# ]
+countries_codes = [
+    "Austria (AT)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
+    "Switzerland (CH)", "Cyprus (CY)", "Czech Republic (CZ)", "Germany (DE)",
+    "DK1", "DK2", "Estonia (EE)", "Spain (ES)",
+    "Finland (FI)", "France (FR)", "United Kingdom (UK)", "Georgia (GE)", "Greece (GR)", "Croatia (HR)", "Hungary (HU)",
+    "Ireland (IE)", "Italy (IT)",
+    "Lithuania (LT)", "Luxembourg (LU)", "Latvia (LV)", "Moldova (MD)",
+    "Montenegro (ME)", "North Macedonia (MK)", "Netherlands (NL)",
+    "NO1", "NO2", "NO3", "NO4", "NO5", "Poland (PL)", "Portugal (PT)",
+    "Romania (RO)", "Serbia (RS)", "SE1", "SE2", "SE3", "SE4",
+    "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)",
+]
 
 ZONES = ["NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "SE1", "SE2", "SE3", "SE4"]
 LOCATION_COLS_PV = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region", "Project Name"]
@@ -582,12 +582,8 @@ class MonthlyRunner:
         return model.loc[common], actual.loc[common]
     
     def _weighted_factor_from_history(self, area_code: str, factor_col: str, ms: MonthSpec) -> float | None:
-        target_year = int(ms.year)
         target_month = int(ms.month_number)
-
-        total_weight = 0.0
-        total_value = 0.0
-
+        values = []
         cf_root = self.history_root
         if not cf_root.exists():
             return None
@@ -604,11 +600,12 @@ class MonthlyRunner:
             except ValueError:
                 continue
 
-            if (year > target_year) or (year == target_year and month >= target_month):
+            # Limit to before June 2021
+            if year > 2021 or (year == 2021 and month >= 6):
                 continue
-
-            months_diff = (target_year - year) * 12 + (target_month - month)
-            if months_diff <= 0:
+            
+            # Use only the same month
+            if month != target_month:
                 continue
 
             df = pd.read_csv(f)
@@ -626,13 +623,11 @@ class MonthlyRunner:
             if not np.isfinite(val) or float(val) <= 0.0:
                 continue
 
-            weight = 1.0 / months_diff
-            total_weight += weight
-            total_value += weight * float(val)
+            values.append(float(val))
 
-        if total_weight == 0.0:
+        if not values:
             return None
-        return total_value / total_weight
+        return sum(values) / len(values)
 
     def plotting_timeseries(
         self,

@@ -122,7 +122,7 @@ def generate_farm_power_curve(turb_name, n_turbines):
     interp_power = np.interp(interp_ws, single_turbine_ws, single_turbine_power)
 
     for i, ws_mean in enumerate(farm_wind_speeds):
-        std_dev = 0.6 + 0.2 * farm_wind_speeds[i] #Increasing std dev with wind speed
+        std_dev = 0.6 + 0.1 * farm_wind_speeds[i] #Increasing std dev with wind speed
 
         wind_dist = norm(loc=ws_mean, scale=std_dev)
 
@@ -390,7 +390,7 @@ def estimate_power_final(country, lat, lon, capacity_mw, capacity_rating, status
         if use_tracking:
             tracker_data = pvlib.tracking.singleaxis(
                 apparent_zenith=sol_app_zenith_vals,
-                apparent_azimuth=sol_azimuth_vals,
+                solar_azimuth=sol_azimuth_vals,
                 axis_tilt=0, axis_azimuth=180, max_angle=60, backtrack=True, gcr=0.4
             )
             # Use np.nan_to_num as these are numpy arrays
@@ -561,27 +561,29 @@ def operating_farms(country, power_type):
             "Austria": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Switzerland": ["operating"],
             "Italy": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "Spain": ["operating", "construction"],
+            "Spain": ["operating"],
             "Portugal": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Greece": ["operating"],
             "Ireland": ["operating"],
             "Croatia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Slovenia": ["operating"],
-            "Czech Republic": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "Czech Republic": ["operating", "construction", "pre-construction", "shelved - inferred 2 y"],
             "Slovakia": ["operating"],
+            "Serbia": ["operating"],
+            "Slovenia": ["operating"],
             "Moldova": ["operating"],
             "Romania": ["operating"],
             "Bulgaria": ["operating"],
             "Hungary": ["operating"],
             "Poland": ["operating"],
-            "Lithuania": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "Latvia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "Lithuania": ["operating"],
+            "Latvia": ["operating"],
             "Estonia": ["operating"],
             "Luxembourg": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Iceland": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Bosnia and Herzegovina": ["operating"],
-            "Cyprus": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "Montenegro": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "Cyprus": ["operating", "construction"],
+            "Montenegro": ["operating"],
             "North Macedonia": ["operating"],
             "Kosovo": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
         }
@@ -607,12 +609,14 @@ def operating_farms(country, power_type):
             "Slovenia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Czech Republic": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Slovakia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "Serbia": ["operating"],
+            "Slovenia": ["operating"],
             "Moldova": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Romania": ["operating"],
             "Bulgaria": ["operating", "construction"],
             "Hungary": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "Poland": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "Lithuania": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "Poland": ["operating"],
+            "Lithuania": ["operating"],
             "Latvia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Estonia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Luxembourg": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
@@ -620,7 +624,7 @@ def operating_farms(country, power_type):
             "Bosnia and Herzegovina": ["operating"],
             "Cyprus": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
             "Montenegro": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
-            "North Macedonia": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
+            "North Macedonia": ["operating"],
             "Kosovo": ["operating", "construction", "pre-construction", "shelved", "shelved - inferred 2 y"],
         }
     else:
@@ -730,6 +734,66 @@ def get_bidding_zone_mapping(zone):
     if zone not in zone_dict:
         raise ValueError(f"Bidding zone '{zone}' not found.")
     return zone_dict[zone]
+
+def get_area_code_mapping():
+    """
+    Returns a dictionary mapping country codes to their respective area codes.
+    """
+    mapping = {
+            "Denmark": ["10YDK-1--------W", "10YDK-2--------M"], 
+            "Denmark (DK)": ["10YDK-1--------W", "10YDK-2--------M"],
+            "DK1": ["10YDK-1--------W"],
+            "DK2": ["10YDK-2--------M"],
+            "NO1": ["10YNO-1--------2"],
+            "NO2": ["10YNO-2--------T"],
+            "NO3": ["10YNO-3--------J"],
+            "NO4": ["10YNO-4--------9"],
+            "NO5": ["10Y1001A1001A48H"],
+            "SE1": ["10Y1001A1001A44P"],
+            "SE2": ["10Y1001A1001A45N"],
+            "SE3": ["10Y1001A1001A46L"],
+            "SE4": ["10Y1001A1001A47J"],
+            "Austria (AT)": ["10YAT-APG------L"],
+            "Bosnia and Herz. (BA)": ["10YBA-JPCC-----D"],
+            "Belgium (BE)": ["10YBE----------2"],
+            "Bulgaria (BG)": ["10YCA-BULGARIA-R"],
+            "Switzerland (CH)": ["10YCH-SWISSGRIDZ"],
+            "Cyprus (CY)": ["10YCY-1001A0003J"],
+            "Czech Republic (CZ)": ["10YCZ-CEPS-----N"],
+            "Germany (DE)": ["10Y1001A1001A83F"], 
+            "Estonia (EE)": ["10Y1001A1001A39I"],
+            "Spain (ES)": ["10YES-REE------0"],
+            "Finland (FI)": ["10YFI-1--------U"],
+            "France (FR)": ["10YFR-RTE------C"],
+            # Updated UK mappings:
+            "United Kingdom (UK)": ["10Y1001A1001A92E"],
+            "Great Britain (GB)": ["10YGB----------A"],
+            "Northern Ireland (UK)": ["10Y1001A1001A59C"], # Added this
+            "Georgia (GE)": [], 
+            "Greece (GR)": ["10YGR-HTSO-----Y"],
+            "Croatia (HR)": ["10YHR-HEP------M"],
+            "Hungary (HU)": ["10YHU-MAVIR----U"],
+            "Ireland (IE)": ["10YIE-1001A00010"],
+            "Italy (IT)": ["10YIT-GRTN-----B"],
+            "Lithuania (LT)": ["10YLT-1001A0008Q"],
+            "Luxembourg (LU)": ["10YLU-CEGEDEL-NQ"],
+            "Latvia (LV)": ["10YLV-1001A00074"],
+            "Moldova (MD)": ["10Y1001A1001A990"],
+            "Montenegro (ME)": ["10YCS-CG-TSO---S"],
+            "North Macedonia (MK)": ["10YMK-MEPSO----8"],
+            "Netherlands (NL)": ["10YNL----------L"],
+            "Norway (NO)": ["10YNO-0--------C"], 
+            "Poland (PL)": ["10YPL-AREA-----S"],
+            "Portugal (PT)": ["10YPT-REN------W"],
+            "Romania (RO)": ["10YRO-TEL------P"],
+            "Serbia (RS)": ["10YCS-SERBIATSOV"],
+            "Sweden (SE)": ["10YSE-1--------K"], 
+            "Slovenia (SI)": ["10YSI-ELES-----O"],
+            "Slovakia (SK)": ["10YSK-SEPS-----K"],
+            "Kosovo (XK)": ["10Y1001C--00100H"],
+        }
+    return mapping
+
 
 def get_timezone_mapping():
     """
