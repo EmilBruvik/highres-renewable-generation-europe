@@ -3,7 +3,7 @@
 
 #-----------Run commands----------------#
 # python -u scripts/weather_energy_monthly.py --year 2023 --month 02 --n-jobs-pv 2
-# for m in $(seq -w 5 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
@@ -45,7 +45,7 @@ MONTHS = [
 ]
 
 countries_tracker = [
-    "Austria", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
+    "Austria", "Albania", "Bosnia and Herzegovina", "Belgium", "Bulgaria",
     "Switzerland", "Cyprus", "Czech Republic", "Germany",
     "Denmark", "Denmark", "Estonia", "Spain",
     "Finland", "France", "United Kingdom", "Georgia", "Greece", "Croatia", "Hungary",
@@ -54,14 +54,11 @@ countries_tracker = [
     "Montenegro", "North Macedonia", "Netherlands",
     "Norway", "Norway", "Norway", "Norway", "Norway", "Poland", "Portugal",
     "Romania", "Serbia", "Sweden", "Sweden", "Sweden", "Sweden",
-    "Slovenia", "Slovakia", "Kosovo",
+    "Slovenia", "Slovakia", "Kosovo", "Ukraine", "Åland Islands"
 ]
 
-# countries_tracker = ["United Kingdom"]
-# countries_codes = ["United Kingdom (UK)"]
-
 countries_codes = [
-    "Austria (AT)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
+    "Austria (AT)", "Albania (AL)", "Bosnia and Herz. (BA)", "Belgium (BE)", "Bulgaria (BG)",
     "Switzerland (CH)", "Cyprus (CY)", "Czech Republic (CZ)", "Germany (DE)",
     "DK1", "DK2", "Estonia (EE)", "Spain (ES)",
     "Finland (FI)", "France (FR)", "United Kingdom (UK)", "Georgia (GE)", "Greece (GR)", "Croatia (HR)", "Hungary (HU)",
@@ -70,7 +67,7 @@ countries_codes = [
     "Montenegro (ME)", "North Macedonia (MK)", "Netherlands (NL)",
     "NO1", "NO2", "NO3", "NO4", "NO5", "Poland (PL)", "Portugal (PT)",
     "Romania (RO)", "Serbia (RS)", "SE1", "SE2", "SE3", "SE4",
-    "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)",
+    "Slovenia (SI)", "Slovakia (SK)", "Kosovo (XK)", "Ukraine (UA)", "Åland Islands (ÅL)",
 ]
 
 ZONES = ["NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "SE1", "SE2", "SE3", "SE4"]
@@ -297,8 +294,8 @@ class PVCalculator:
         use_fallback = force_factor or solar_actual.sum() <= 1.0
 
         if use_fallback and fallback_factor is None:
-            print(f"Skipping {country} (PV): No actual production data found.", flush=True)
-            return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
+            print(f"No actual production data for {country} (PV). Using correction factor = 1.0.", flush=True)
+            fallback_factor = 1.0
 
         lat = df_country["Latitude"].to_numpy()
         lon = df_country["Longitude"].to_numpy()
@@ -451,8 +448,8 @@ class WindCalculator:
         use_fallback = force_factor or wind_actual.sum() <= 1.0
 
         if use_fallback and fallback_factor is None:
-            print(f"Skipping {country} (Wind): No actual production data found.", flush=True)
-            return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
+            print(f"No actual production data for {country} (Wind). Using correction factor = 1.0.", flush=True)
+            fallback_factor = 1.0
 
         lat = df_country["Latitude"].to_numpy()
         lon = df_country["Longitude"].to_numpy()
@@ -791,7 +788,6 @@ class MonthlyRunner:
 
             areas.append(code)
 
-            # --- Append factors to list ---
             factor_records.append({
                 "Area": code,
                 "PV_Factor": pv_factor,
@@ -802,9 +798,7 @@ class MonthlyRunner:
             alpha_out.parent.mkdir(parents=True, exist_ok=True)
             alpha_dataframe = pd.DataFrame(factor_records, columns=["Area", "PV_Factor", "Wind_Factor"])
             alpha_dataframe.to_csv(alpha_out, index=False)
-            print(f"Wrote correction factors file: {alpha_out}", flush=True)
 
-            # Plots
             self.plotting_timeseries(
                 ms=ms,
                 area_code=code,
