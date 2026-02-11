@@ -2,8 +2,8 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2023 --month 02 --n-jobs-pv 2
-# for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
+# python -u scripts/weather_energy_monthly.py --year 2025 --month 07 --n-jobs-pv 2
+# for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2020 --month "$m" --n-jobs-pv 2; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
@@ -73,6 +73,22 @@ countries_codes = [
 ZONES = ["NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "SE1", "SE2", "SE3", "SE4"]
 LOCATION_COLS_PV = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region", "Project Name"]
 LOCATION_COLS_WIND = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region"]
+
+
+def _read_tracker_csv(path: str) -> pd.DataFrame:
+    for enc in ("utf-8", "latin1", "cp1252"):
+        try:
+            return pd.read_csv(path, sep=";", decimal=",", encoding=enc, low_memory=False)
+        except UnicodeDecodeError:
+            continue
+    return pd.read_csv(
+        path,
+        sep=";",
+        decimal=",",
+        encoding="latin1",
+        encoding_errors="replace",
+        low_memory=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -185,15 +201,11 @@ class ActualGenerationLoader:
 class PVCalculator:
     def __init__(self, n_jobs: int = 8):
         self.n_jobs = n_jobs
-        self.df_20 = pd.read_csv(
-            "/Data/gfi/vindenergi/nab015/Solar_data/Global-Solar-Power-Tracker-February-2025-20MW+.csv",
-            sep=";",
-            decimal=",",
+        self.df_main = _read_tracker_csv(
+            "/Data/gfi/vindenergi/nab015/Solar_data/Global-Solar-Power-Tracker-February-2026.csv"
         )
-        self.df_1_20 = pd.read_csv(
-            "/Data/gfi/vindenergi/nab015/Solar_data/Global-Solar-Power-Tracker-February-2025-1MW-20MW.csv",
-            sep=";",
-            decimal=",",
+        self.df_distributed = _read_tracker_csv(
+            "/Data/gfi/vindenergi/nab015/Solar_data/Global-Solar-Power-Tracker-February-2026-Distributed.csv"
         )
 
     @staticmethod
@@ -247,13 +259,7 @@ class PVCalculator:
         fallback_factor: float | None = None,
         force_factor: bool = False,
     ):
-        df_country = pd.concat(
-            [
-                self.df_20[self.df_20["Country/Area"] == country],
-                self.df_1_20[self.df_1_20["Country/Area"] == country],
-            ],
-            ignore_index=True,
-        )
+        df_country = self.df_main[self.df_main["Country/Area"] == country].copy()
 
         if area_code in ZONES:
             if area_code.startswith('DK'):
@@ -282,6 +288,14 @@ class PVCalculator:
 
         op_status = set(functions.operating_farms(country, "solar"))
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
+
+        df_dist_country = self.df_distributed[self.df_distributed["Country/Area"] == country].copy()
+        if "Status" in df_dist_country.columns:
+            df_dist_country = df_dist_country[df_dist_country["Status"].isin(op_status)].copy()
+        distributed_capacity = pd.to_numeric(
+            df_dist_country.get("Capacity (MW)", pd.Series(dtype=float)),
+            errors="coerce",
+        ).fillna(0.0).sum()
         
         df_country["Latitude"] = pd.to_numeric(df_country["Latitude"], errors="coerce")
         df_country["Longitude"] = pd.to_numeric(df_country["Longitude"], errors="coerce")
@@ -356,6 +370,18 @@ class PVCalculator:
 
         mw_2025 = watts_2025 / 1_000_000.0
         mw_asbuilt = watts_asbuilt / 1_000_000.0
+
+        total_capacity = pd.to_numeric(df_country["Capacity (MW)"], errors="coerce").fillna(0.0).sum()
+        if total_capacity > 0 and distributed_capacity > 0:
+            capacity_scale = float((total_capacity + distributed_capacity) / total_capacity)
+            mw_asbuilt *= capacity_scale
+            mw_2025 *= capacity_scale
+        elif total_capacity <= 0 and distributed_capacity > 0:
+            print(
+                f"No geo-located PV farms found for {country}, but distributed capacity exists. "
+                "Skipping capacity scaling.",
+                flush=True,
+            )
         
         if use_fallback:
             factor = float(fallback_factor)
@@ -392,11 +418,13 @@ class PVCalculator:
 
 class WindCalculator:
     def __init__(self):
-        self.df = pd.read_csv(
-            "/Data/gfi/vindenergi/nab015/Wind_data/Global-Wind-Power-Tracker-February-2025.csv",
-            sep=";",
-            decimal=",",
+        df_main = _read_tracker_csv(
+            "/Data/gfi/vindenergi/nab015/Wind_data/Global-Wind-Power-Tracker-February-2026.csv"
         )
+        df_below = _read_tracker_csv(
+            "/Data/gfi/vindenergi/nab015/Wind_data/Global-Wind-Power-Tracker-February-2026-Below_Threshold.csv"
+        )
+        self.df = pd.concat([df_main, df_below], ignore_index=True)
         self.ref_startyear = int(pd.to_numeric(self.df["Start year"], errors="coerce").median())
 
     def open_weather(self, ms: MonthSpec) -> xr.Dataset:
@@ -645,7 +673,7 @@ class MonthlyRunner:
         solar_actual = self.actual_loader.solar_series_mw(actual_file, area_code)
         pv_model_series, solar_actual_series = self._align_series(pv_model, pv_time, solar_actual)
 
-        pv_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/pv_power_comparison/{ms.year}/{ms.month_number}")
+        pv_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/pv_power_comparison/new_data/{ms.year}/{ms.month_number}")
         pv_dir.mkdir(parents=True, exist_ok=True)
 
         fig, ax = plt.subplots(figsize=(12, 5))
@@ -671,7 +699,7 @@ class MonthlyRunner:
         wind_actual = self.actual_loader.wind_series_mw(actual_file, area_code)
         wind_model_series, wind_actual_series = self._align_series(wind_model, wind_time, wind_actual)
 
-        wind_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/wind_power_comparison/{ms.year}/{ms.month_number}")
+        wind_dir = Path(f"/Data/gfi/vindenergi/nab015/figures/wind_power_comparison/new_data/{ms.year}/{ms.month_number}")
         wind_dir.mkdir(parents=True, exist_ok=True)
 
         fig, ax = plt.subplots(figsize=(16, 7))
@@ -696,7 +724,13 @@ class MonthlyRunner:
     def run_month(self, ms: MonthSpec) -> Path:
         print(f"\n=== Running {ms.year}-{ms.month_number} ({ms.month_name}) ===", flush=True)
 
-        actual_file = self.actual_loader.load_month_file(ms.year, ms.month_number)
+        if int(ms.year) < 2015:
+             # Before 2015, no actual generation data is available. 
+             # Create a dummy dataframe so the loader methods return empty Series without crashing.
+            actual_file = pd.DataFrame(columns=["AreaDisplayName", "AreaCode", "ProductionType", "ActualGenerationOutput[MW]", "DateTime(UTC)", "MTU"])
+        else:
+            actual_file = self.actual_loader.load_month_file(ms.year, ms.month_number)
+        
         pv_ds = self.pv.open_weather(ms)
         pv_indexer = GridIndexer(pv_ds["latitude"].values, pv_ds["longitude"].values)
         
@@ -720,6 +754,7 @@ class MonthlyRunner:
         factor_records = [] 
 
         for country, code in zip(countries_tracker, countries_codes):
+            before_2015 = int(ms.year) < 2015
             uk_after_may_2021 = (
                 country == "United Kingdom"
                 and (
@@ -728,9 +763,11 @@ class MonthlyRunner:
                 )
             )
 
+            force_historical_factor = before_2015 or uk_after_may_2021
+
             pv_fallback = None
             wind_fallback = None
-            if uk_after_may_2021:
+            if force_historical_factor:
                 pv_fallback = self._weighted_factor_from_history(code, "PV_Factor", ms)
                 wind_fallback = self._weighted_factor_from_history(code, "Wind_Factor", ms)
 
@@ -745,7 +782,7 @@ class MonthlyRunner:
                 code,
                 return_farm_data=True,
                 fallback_factor=pv_fallback,
-                force_factor=uk_after_may_2021 and pv_fallback is not None,
+                force_factor=force_historical_factor and pv_fallback is not None,
             )
             pv_as, pv_25, pv_factor, pv_df_country, pv_farms = pv_ret
             
@@ -770,7 +807,7 @@ class MonthlyRunner:
                 code,
                 return_farm_data=True,
                 fallback_factor=wind_fallback,
-                force_factor=uk_after_may_2021 and wind_fallback is not None,
+                force_factor=force_historical_factor and wind_fallback is not None,
             )
             w_as, w_25, w_factor, w_df_country, w_farms = wind_ret
 
