@@ -2,8 +2,8 @@
 # coding: utf-8
 
 #-----------Run commands----------------#
-# python -u scripts/weather_energy_monthly.py --year 2025 --month 07 --n-jobs-pv 2
-# for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2020 --month "$m" --n-jobs-pv 2; done
+# python -u scripts/weather_energy_monthly.py --year 2024 --month 01 --n-jobs-pv 2
+# for m in $(seq -w 1 6); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done
 # for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2 --write-farm-timeseries; done
 
 # nohup bash -lc 'for m in $(seq -w 1 12); do python -u scripts/weather_energy_monthly.py --year 2024 --month "$m" --n-jobs-pv 2; done' > run_2024.log 2>&1 &
@@ -27,6 +27,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import xarray as xr
+import rasterio
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
 import sys  
@@ -74,6 +75,27 @@ ZONES = ["NO1", "NO2", "NO3", "NO4", "NO5", "DK1", "DK2", "SE1", "SE2", "SE3", "
 LOCATION_COLS_PV = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region", "Project Name"]
 LOCATION_COLS_WIND = ["City", "State/Province", "Local area (taluk, county)", "Subregion", "Region"]
 
+POP_COUNTRY_TO_ISO3 = {
+    "Austria": "aut",
+    "Switzerland": "che",
+    "Czech Republic": "cze",
+    "Germany": "deu",
+    "Denmark": "dnk",
+    "Spain": "esp",
+    "Finland": "fin",
+    "France": "fra",
+    "United Kingdom": "gbr",
+    "Greece": "grc",
+    "Hungary": "hun",
+    "Italy": "ita",
+    "Lithuania": "ltu",
+    "Luxembourg": "lux",
+    "Netherlands": "nld",
+    "Poland": "pol",
+    "Portugal": "prt",
+    "Sweden": "swe",
+}
+
 
 def _read_tracker_csv(path: str) -> pd.DataFrame:
     for enc in ("utf-8", "latin1", "cp1252"):
@@ -89,6 +111,13 @@ def _read_tracker_csv(path: str) -> pd.DataFrame:
         encoding_errors="replace",
         low_memory=False,
     )
+
+
+def _installation_bucket(value: object) -> str:
+    txt = str(value).strip().lower()
+    if "offshore" in txt:
+        return "offshore"
+    return "onshore"
 
 
 @dataclass(frozen=True)
@@ -259,7 +288,8 @@ class PVCalculator:
         fallback_factor: float | None = None,
         force_factor: bool = False,
     ):
-        df_country = self.df_main[self.df_main["Country/Area"] == country].copy()
+        df_country_all = self.df_main[self.df_main["Country/Area"] == country].copy()
+        df_country = df_country_all.copy()
 
         if area_code in ZONES:
             if area_code.startswith('DK'):
@@ -287,6 +317,7 @@ class PVCalculator:
             return (*empty_ret, pd.DataFrame(), []) if return_farm_data else empty_ret
 
         op_status = set(functions.operating_farms(country, "solar"))
+        df_country_all = df_country_all[df_country_all["Status"].isin(op_status)].copy()
         df_country = df_country[df_country["Status"].isin(op_status)].copy()
 
         df_dist_country = self.df_distributed[self.df_distributed["Country/Area"] == country].copy()
@@ -297,6 +328,10 @@ class PVCalculator:
             errors="coerce",
         ).fillna(0.0).sum()
         
+        df_country_all["Latitude"] = pd.to_numeric(df_country_all["Latitude"], errors="coerce")
+        df_country_all["Longitude"] = pd.to_numeric(df_country_all["Longitude"], errors="coerce")
+        df_country_all = df_country_all.dropna(subset=["Latitude", "Longitude"])
+
         df_country["Latitude"] = pd.to_numeric(df_country["Latitude"], errors="coerce")
         df_country["Longitude"] = pd.to_numeric(df_country["Longitude"], errors="coerce")
         df_country = df_country.dropna(subset=["Latitude", "Longitude"])
@@ -371,11 +406,16 @@ class PVCalculator:
         mw_2025 = watts_2025 / 1_000_000.0
         mw_asbuilt = watts_asbuilt / 1_000_000.0
 
+        capacity_scale = 1.0
         total_capacity = pd.to_numeric(df_country["Capacity (MW)"], errors="coerce").fillna(0.0).sum()
-        if total_capacity > 0 and distributed_capacity > 0:
-            capacity_scale = float((total_capacity + distributed_capacity) / total_capacity)
-            mw_asbuilt *= capacity_scale
-            mw_2025 *= capacity_scale
+        total_capacity_country = pd.to_numeric(df_country_all["Capacity (MW)"], errors="coerce").fillna(0.0).sum()
+
+        distributed_capacity_effective = float(distributed_capacity)
+        if area_code in ZONES and total_capacity_country > 0 and distributed_capacity > 0:
+            distributed_capacity_effective = float(distributed_capacity * (total_capacity / total_capacity_country))
+
+        if total_capacity > 0 and distributed_capacity_effective > 0:
+            capacity_scale = float((total_capacity + distributed_capacity_effective) / total_capacity)
         elif total_capacity <= 0 and distributed_capacity > 0:
             print(
                 f"No geo-located PV farms found for {country}, but distributed capacity exists. "
@@ -388,10 +428,13 @@ class PVCalculator:
         else:
             factor = self._factor_from_asbuilt(mw_asbuilt, xrds["time"].values, solar_actual)
 
+        mw_asbuilt_agg = mw_asbuilt * capacity_scale
+        mw_2025_agg = mw_2025 * capacity_scale
+
         shifted_index = pd.to_datetime(xrds["time"].values) - pd.Timedelta(hours=1)
 
-        mw_asbuilt_series = pd.Series(mw_asbuilt * factor, index=shifted_index).astype(np.float64)
-        mw_2025_series = pd.Series(mw_2025 * factor, index=shifted_index).astype(np.float64)
+        mw_asbuilt_series = pd.Series(mw_asbuilt_agg * factor, index=shifted_index).astype(np.float64)
+        mw_2025_series = pd.Series(mw_2025_agg * factor, index=shifted_index).astype(np.float64)
 
         res = (
             mw_asbuilt_series.values,
@@ -571,6 +614,122 @@ class MonthlyRunner:
         self.pv = PVCalculator(n_jobs=n_jobs_pv)
         self.wind = WindCalculator()
 
+        self.population_distribution_dir = self._get_population_distribution_dir()
+        self.population_raster_files = self._index_population_raster_files()
+        self._population_weights_cache: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray] | None] = {}
+        self._population_warned_countries: set[str] = set()
+
+    def _get_population_distribution_dir(self) -> Path | None:
+        pop_dir = Path(
+            os.environ.get(
+                "PV_POPULATION_DISTRIBUTION_DIR",
+                "/Data/gfi/vindenergi/nab015/Solar_data/population_distribution",
+            )
+        )
+        if not pop_dir.exists():
+            print(
+                f"Population distribution directory not found: {pop_dir}. "
+                "Distributed PV grid will use farm-capacity fallback weights.",
+                flush=True,
+            )
+            return None
+        return pop_dir
+
+    def _index_population_raster_files(self) -> dict[str, Path]:
+        if self.population_distribution_dir is None:
+            return {}
+
+        files: dict[str, Path] = {}
+        for tif in sorted(self.population_distribution_dir.glob("*_pop_2026_*_v1.tif")):
+            iso3 = tif.name.split("_", 1)[0].lower()
+            files[iso3] = tif
+
+        if not files:
+            print(
+                f"No population raster files found in {self.population_distribution_dir}. "
+                "Distributed PV grid will use farm-capacity fallback weights.",
+                flush=True,
+            )
+        return files
+
+    def _country_population_cell_weights(
+        self,
+        country: str,
+        indexer: GridIndexer,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if country in self._population_weights_cache:
+            return self._population_weights_cache[country]
+
+        iso3 = POP_COUNTRY_TO_ISO3.get(country)
+        if iso3 is None:
+            self._population_weights_cache[country] = None
+            return None
+
+        raster_path = self.population_raster_files.get(iso3)
+        if raster_path is None:
+            self._population_weights_cache[country] = None
+            return None
+
+        try:
+            with rasterio.open(raster_path) as src:
+                arr = src.read(1, masked=True)
+                data = np.asarray(arr.filled(0.0), dtype=np.float64)
+                valid = np.isfinite(data) & (data > 0.0)
+                if not np.any(valid):
+                    self._population_weights_cache[country] = None
+                    return None
+
+                row_idx, col_idx = np.where(valid)
+                weights_raw = data[row_idx, col_idx]
+                lon_vals, lat_vals = rasterio.transform.xy(src.transform, row_idx, col_idx, offset="center")
+                lat = np.asarray(lat_vals, dtype=np.float64)
+                lon = np.asarray(lon_vals, dtype=np.float64)
+        except Exception:
+            self._population_weights_cache[country] = None
+            return None
+
+        y_idx, x_idx = indexer.map_points(lat, lon)
+        rows = pd.DataFrame({"y_idx": y_idx, "x_idx": x_idx, "w": weights_raw})
+        grouped = rows.groupby(["y_idx", "x_idx"], as_index=False)["w"].sum()
+        y = grouped["y_idx"].to_numpy(dtype=int)
+        x = grouped["x_idx"].to_numpy(dtype=int)
+        w = grouped["w"].to_numpy(dtype=np.float64)
+
+        w_sum = float(w.sum())
+        if w_sum <= 0:
+            self._population_weights_cache[country] = None
+            return None
+
+        w = w / w_sum
+        out = (y, x, w)
+        self._population_weights_cache[country] = out
+        return out
+
+    @staticmethod
+    def _farm_capacity_cell_weights(df_country: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if df_country is None or df_country.empty:
+            return None
+        if not {"y_idx", "x_idx", "Capacity (MW)"}.issubset(df_country.columns):
+            return None
+
+        tmp = df_country[["y_idx", "x_idx", "Capacity (MW)"]].copy()
+        tmp["y_idx"] = pd.to_numeric(tmp["y_idx"], errors="coerce")
+        tmp["x_idx"] = pd.to_numeric(tmp["x_idx"], errors="coerce")
+        tmp["w"] = pd.to_numeric(tmp["Capacity (MW)"], errors="coerce")
+        tmp = tmp.dropna(subset=["y_idx", "x_idx", "w"])
+        tmp = tmp[tmp["w"] > 0]
+        if tmp.empty:
+            return None
+
+        grouped = tmp.groupby(["y_idx", "x_idx"], as_index=False)["w"].sum()
+        y = grouped["y_idx"].to_numpy(dtype=int)
+        x = grouped["x_idx"].to_numpy(dtype=int)
+        w = grouped["w"].to_numpy(dtype=np.float64)
+        w_sum = float(w.sum())
+        if w_sum <= 0:
+            return None
+        return y, x, (w / w_sum)
+
     @staticmethod
     def _write_atomic(ds: xr.Dataset, out_path: Path):
         """Write NetCDF with atomic write and COMPRESSION."""
@@ -743,7 +902,9 @@ class MonthlyRunner:
         
         # We will use PV coordinates for the final output grid
         global_pv_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
-        global_wind_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        global_pv_distributed_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        global_wind_onshore_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
+        global_wind_offshore_grid = np.zeros((T_pv, Y_dim, X_dim), dtype=np.float32)
 
         pv_asbuilt_all = []
         pv_2025_all = []
@@ -789,13 +950,34 @@ class MonthlyRunner:
             pv_asbuilt_all.append(pv_as)
             pv_2025_all.append(pv_25)
 
+            pv_farm_only_area = np.zeros(T_pv, dtype=np.float64)
             if pv_farms:
                 for i, ts_watts in pv_farms:
                     y = pv_df_country.iloc[i]["y_idx"]
                     x = pv_df_country.iloc[i]["x_idx"]
                     
                     ts_mw = (ts_watts / 1_000_000.0) * pv_factor
+                    pv_farm_only_area += ts_mw
                     global_pv_grid[:, int(y), int(x)] += ts_mw
+
+            pv_distributed_area = np.maximum(pv_as - pv_farm_only_area, 0.0)
+            if np.any(pv_distributed_area > 0):
+                pop_weights = self._country_population_cell_weights(country, pv_indexer)
+                if pop_weights is None:
+                    pop_weights = self._farm_capacity_cell_weights(pv_df_country)
+                    if country not in self._population_warned_countries:
+                        print(
+                            f"No population weights found for {country}; "
+                            "using farm-capacity fallback for distributed PV grid.",
+                            flush=True,
+                        )
+                        self._population_warned_countries.add(country)
+
+                if pop_weights is not None:
+                    y_w, x_w, w = pop_weights
+                    global_pv_distributed_grid[:, y_w, x_w] += (
+                        pv_distributed_area[:, None] * w[None, :]
+                    ).astype(np.float32)
 
             wind_ret = self.wind.country_timeseries(
                 ms,
@@ -821,7 +1003,11 @@ class MonthlyRunner:
                     
                     # Apply factor
                     ts_mw = ts_mw_unc * w_factor
-                    global_wind_grid[:, int(y), int(x)] += ts_mw
+                    bucket = _installation_bucket(w_df_country.iloc[i].get("Installation Type", ""))
+                    if bucket == "offshore":
+                        global_wind_offshore_grid[:, int(y), int(x)] += ts_mw
+                    else:
+                        global_wind_onshore_grid[:, int(y), int(x)] += ts_mw
 
             areas.append(code)
 
@@ -885,8 +1071,10 @@ class MonthlyRunner:
         # Using dimensions and coords from pv_ds as reference
         grid_out = xr.Dataset(
             {
-                'wind_power_mw': (("time", "y", "x"), global_wind_power_grid := global_wind_grid),
+                'wind_power_mw_onshore': (("time", "y", "x"), global_wind_onshore_grid),
+                'wind_power_mw_offshore': (("time", "y", "x"), global_wind_offshore_grid),
                 'pv_power_mw': (("time", "y", "x"), global_pv_power_grid := global_pv_grid),
+                'pv_power_mw_distributed': (("time", "y", "x"), global_pv_distributed_grid),
             },
             coords={
                 'time': (("time",), pv_ds['time'].values),
@@ -896,9 +1084,15 @@ class MonthlyRunner:
                 'longitude': (("y", 'x'), pv_ds['longitude'].values)
             }
         )
+        grid_out['wind_power_mw_onshore'].attrs['description'] = 'Onshore wind power only'
+        grid_out['wind_power_mw_offshore'].attrs['description'] = 'Offshore wind power only'
+        grid_out['pv_power_mw_distributed'].attrs['description'] = 'Distributed PV power only (non-geolocated component)'
+        grid_out['pv_power_mw_distributed'].attrs['distribution_method'] = (
+            'WorldPop 2026 country GeoTIFF weighting; fallback to farm-capacity weighting if raster missing'
+        )
         
         # Free memory
-        del global_wind_grid, global_pv_grid
+        del global_wind_onshore_grid, global_wind_offshore_grid, global_pv_grid, global_pv_distributed_grid
 
         out_file_grid = self.out_dir_farms / f"{ms.month_number}_{ms.year}_pv_wind_grid.nc"
         if out_file_grid.exists():
